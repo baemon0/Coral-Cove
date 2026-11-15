@@ -1,0 +1,202 @@
+{
+  "entities": {
+    "PlayerProfile": {
+      "title": "PlayerProfile",
+      "description": "Persistent cloud profile storing player nickname, gold balance, position, equipped custom/luxury appearance, owned clothing items inventory, and resource inventory.",
+      "type": "object",
+      "properties": {
+        "playerId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "gold": {
+          "type": "number"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "dir": {
+          "type": "string",
+          "enum": ["down", "up", "left", "right"]
+        },
+        "appearance": {
+          "type": "object"
+        },
+        "ownedItems": {
+          "type": "array"
+        },
+        "inventory": {
+          "type": "object"
+        },
+        "lastSale": {
+          "type": "object"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "playerId",
+        "playerName",
+        "gold",
+        "x",
+        "y",
+        "dir",
+        "appearance",
+        "ownedItems",
+        "inventory",
+        "updatedAt"
+      ]
+    },
+    "OnlinePlayer": {
+      "title": "OnlinePlayer",
+      "description": "Real-time multiplayer presence, movement state, and equipped custom pixel-art clothing layers for active island players.",
+      "type": "object",
+      "properties": {
+        "playerId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "dir": {
+          "type": "string",
+          "enum": ["down", "up", "left", "right"]
+        },
+        "isMoving": {
+          "type": "boolean"
+        },
+        "appearance": {
+          "type": "object"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "playerId",
+        "name",
+        "x",
+        "y",
+        "dir",
+        "isMoving",
+        "appearance",
+        "updatedAt"
+      ]
+    },
+    "WorldStructure": {
+      "title": "WorldStructure",
+      "description": "Shared persistent boardwalk docks, 4x3 open-front boutiques, and display mannequins with live resold/custom clothing listings.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "dock_plank",
+            "boutique_shop",
+            "mannequin",
+            "changing_booth",
+            "vanity_mirror",
+            "clothing_rack",
+            "cash_counter",
+            "potted_plant",
+            "lantern_post",
+            "rug_pink",
+            "rug_teal",
+            "rug_gold"
+          ]
+        },
+        "col": {
+          "type": "number"
+        },
+        "row": {
+          "type": "number"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "tier": {
+          "type": "number"
+        },
+        "listing": {
+          "type": "object"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "col",
+        "row",
+        "ownerId",
+        "ownerName",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/players/{playerId}": {
+      "schema": {
+        "$ref": "#/entities/PlayerProfile"
+      },
+      "description": "Persistent cloud save profile per player ID."
+    },
+    "/online_players/{playerId}": {
+      "schema": {
+        "$ref": "#/entities/OnlinePlayer"
+      },
+      "description": "Real-time multiplayer position, direction, walking state, and custom pixel-art appearance."
+    },
+    "/world_structures/{structureId}": {
+      "schema": {
+        "$ref": "#/entities/WorldStructure"
+      },
+      "description": "Shared persistent ocean boardwalk structures and mannequin shop stalls."
+    }
+  }
+}

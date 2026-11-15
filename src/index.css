@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+    background-color: #19537d;
+    font-family: 'Plus Jakarta Sans', 'Cairo', system-ui, -apple-system, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+.font-pixel {
+  font-family: 'Silkscreen', monospace;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.wood-panel {
+  background-color: #f6e4bf;
+  border: 3px solid #4e2a12;
+  box-shadow:
+    inset 0 0 0 3px #b8743c,
+    inset 0 0 0 5px #80481e,
+    0 4px 0 rgba(36, 17, 6, 0.45);
+}
+
+.wood-frame {
+  background-color: #8b5126;
+  border: 3px solid #45230d;
+  box-shadow:
+    inset 0 2px 0 #c6864c,
+    inset 0 -2px 0 #643616,
+    0 4px 0 rgba(36, 17, 6, 0.45);
+}
+
+.wood-slot {
+  background-color: #e9cfa0;
+  border: 2px solid #6b3c1b;
+  box-shadow:
+    inset 2px 2px 0 #b88a56,
+    inset -2px -2px 0 #f7e6c4;
+}
+
+.wood-slot-active {
+  background-color: #fff3d6;
+  border: 2px solid #4e2a12;
+  box-shadow:
+    0 0 0 2px #f6c445,
+    inset 0 0 0 2px #d9822b;
+}
+
+.wood-btn {
+  background-color: #b86f34;
+  color: #fff8e7;
+  border: 2px solid #45230d;
+  box-shadow:
+    inset 0 2px 0 #dc9858,
+    inset 0 -2px 0 #81471c,
+    0 2px 0 rgba(36, 17, 6, 0.4);
+  transition: transform 0.08s ease, background-color 0.12s ease;
+}
+
+.wood-btn:hover {
+  background-color: #c87b3c;
+}
+
+.wood-btn:active {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 2px 0 #81471c,
+    0 1px 0 rgba(36, 17, 6, 0.4);
+}
+

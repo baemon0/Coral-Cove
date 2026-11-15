@@ -1,0 +1,6 @@
+{
+  "name": "Coral Cove",
+  "description": "A cozy 2D top-down pixel art island sandbox with layered character dress-up, wooden docks, and animated ocean waves.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
