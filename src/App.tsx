@@ -117,6 +117,7 @@ import {
   type OnlineShopDirectoryEntry,
   type ShopDecorCatalogItem,
 } from './CommunityModals';
+import { OfflineIndicator, PWAInstallButton } from './PWAInstallControls';
 
 // ============================================================================
 // CONSTANTS & TYPES
@@ -7724,6 +7725,7 @@ export default function App() {
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#1e6292]">
+      <OfflineIndicator />
       <canvas
         ref={mainCanvasRef}
         onMouseMove={handleCanvasMouseMove}
@@ -7899,6 +7901,7 @@ export default function App() {
       {/* TOP-RIGHT HUD: COMPACT TOUCH TOGGLE, SHOPS TELEPORT, ONLINE COUNTER, GOLD & MINIMAP */}
       <div className="pointer-events-auto absolute top-2.5 right-2.5 z-20 flex flex-col items-end gap-1.5">
         <div className="flex items-center justify-end gap-1">
+          <PWAInstallButton variant="hud" onPlayClick={() => sfx.playClick()} />
           <button
             type="button"
             onClick={() => {
@@ -9738,14 +9741,17 @@ export default function App() {
                   )}
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={joiningBusy}
-                  className="wood-btn flex h-11 w-full cursor-pointer items-center justify-center gap-2 text-sm font-bold disabled:cursor-wait disabled:opacity-75"
-                >
-                  <Sparkles className="h-4 w-4" />
-                  <span>{joiningBusy ? 'Connecting to Coral Cove...' : 'Join Island'}</span>
-                </button>
+                <div className="space-y-2">
+                  <button
+                    type="submit"
+                    disabled={joiningBusy}
+                    className="wood-btn flex h-11 w-full cursor-pointer items-center justify-center gap-2 text-sm font-bold disabled:cursor-wait disabled:opacity-75"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    <span>{joiningBusy ? 'Connecting to Coral Cove...' : 'Join Island'}</span>
+                  </button>
+                  <PWAInstallButton variant="join" onPlayClick={() => sfx.playClick()} />
+                </div>
               </div>
             </div>
           </form>

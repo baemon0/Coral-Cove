@@ -1,0 +1,25 @@
+{
+  "id": "/",
+  "name": "Coral Cove",
+  "short_name": "Coral Cove",
+  "description": "Cozy 2D pixel-art island sandbox with custom fashion design, wooden boardwalks, and multiplayer boutiques.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "background_color": "#FFD6E0",
+  "theme_color": "#FFD6E0",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
