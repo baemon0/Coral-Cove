@@ -177,6 +177,68 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "FashionMagazine": {
+      "title": "FashionMagazine",
+      "description": "Player-published lookbook fashion magazine containing up to 6 snapshot pages with captions, stickers, theme, and Island Newsstand pricing.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "authorId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["coral_vogue", "midnight_neon", "seaside_pastel", "royal_gold"]
+        },
+        "price": {
+          "type": "number"
+        },
+        "salesCount": {
+          "type": "number"
+        },
+        "likesCount": {
+          "type": "number"
+        },
+        "pages": {
+          "type": "array"
+        },
+        "createdAtMs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "authorId",
+        "authorName",
+        "theme",
+        "price",
+        "pages",
+        "createdAtMs"
+      ]
     }
   },
   "firestore": {
@@ -197,6 +259,12 @@
         "$ref": "#/entities/WorldStructure"
       },
       "description": "Shared persistent ocean boardwalk structures and mannequin shop stalls."
+    },
+    "/magazines/{magazineId}": {
+      "schema": {
+        "$ref": "#/entities/FashionMagazine"
+      },
+      "description": "Public Island Newsstand fashion magazines published by players."
     }
   }
 }

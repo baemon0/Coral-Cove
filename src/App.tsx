@@ -31,11 +31,19 @@ import {
   Hand,
   Store,
   Package,
+  Sun,
+  Moon,
+  CloudRain,
+  Camera,
+  Newspaper,
+  BookOpen,
 } from 'lucide-react';
 import {
   clampShopTier,
   DESIGN_FABRIC_COST,
   formatEditionBadge,
+  getOutfitEffectMeta,
+  getReactiveBadges,
   getShopTierSpec,
   MAP_COLS,
   MAP_ROWS,
@@ -43,6 +51,7 @@ import {
   TILE_SIZE,
   type BoatCatalogEntry,
   type BoatKind,
+  type OutfitEffectType,
   type PetKind,
   type ShopTier,
 } from './constants';
@@ -69,6 +78,10 @@ import {
   startRunwayAuction,
   placeAuctionBid,
   settleCurrentAuction,
+  subscribeMagazines,
+  publishMagazine,
+  purchaseMagazine,
+  likeMagazine,
   type CloudPlayerProfile,
   type CloudOnlinePlayer,
   type CloudWorldStructure,
@@ -76,6 +89,9 @@ import {
   type CloudInventory,
   type CloudListing,
   type CloudAuction,
+  type CloudMagazine,
+  type MagazinePage,
+  type MagazineTheme,
   type LeaderboardTrader,
   type WorldStructureKind,
 } from './firebase';
@@ -86,6 +102,16 @@ import {
   SLOT_LABELS,
   drawClothingItemOnSprite,
   drawClothingOnMannequin,
+  drawGlowingPearlsSpriteOverlay,
+  drawGlowingPearlsMannequinOverlay,
+  drawNightNeonSpriteOverlay,
+  drawNightNeonMannequinOverlay,
+  drawRainReactiveOverlay,
+  drawRainReactiveMannequinOverlay,
+  drawOutfitAmbientEffects,
+  getActiveRainConfig,
+  getItemsActiveEffects,
+  hasNightNeonItems,
   renderClothingThumbnail,
   generateItemUid,
   type ClothingItem,
@@ -117,6 +143,11 @@ import {
   type OnlineShopDirectoryEntry,
   type ShopDecorCatalogItem,
 } from './CommunityModals';
+import {
+  LookbookCreatorModal,
+  NewsstandModal,
+  type LookbookSnapshot,
+} from './MagazineModals';
 import { OfflineIndicator, PWAInstallButton } from './PWAInstallControls';
 
 // ============================================================================
@@ -129,12 +160,17 @@ const REEF_START_COL = 114;
 const REEF_BOUNDARY_X = (REEF_START_COL - 0.5) * TILE_SIZE;
 const RESOURCE_RESPAWN_SEC = 20;
 const SAVE_STORAGE_KEY = 'coral_cove_sandbox_v5';
+const SNAPSHOTS_STORAGE_KEY = 'coral_cove_snapshots_v1';
 
 const coastColAt = (r: number) =>
   Math.round(74 + Math.sin(r * 0.08) * 4.5 + Math.cos(r * 0.19) * 2.2);
 
 const PLAYER_SPAWN_COL = coastColAt(58) - 5;
 const PLAYER_SPAWN_ROW = 58;
+const NEWSSTAND_COL = PLAYER_SPAWN_COL - 6;
+const NEWSSTAND_ROW = PLAYER_SPAWN_ROW - 4;
+const NEWSSTAND_CENTER_X = (NEWSSTAND_COL + 1.5) * TILE_SIZE;
+const NEWSSTAND_CENTER_Y = (NEWSSTAND_ROW + 1) * TILE_SIZE;
 const RUNWAY_STAGE_COL = PLAYER_SPAWN_COL - 14;
 const RUNWAY_STAGE_ROW = PLAYER_SPAWN_ROW - 6;
 const RUNWAY_PODIUM_X = (RUNWAY_STAGE_COL + 3.5) * TILE_SIZE;
@@ -197,6 +233,10 @@ type PropKind =
   | 'starfish'
   | 'golden_oyster'
   | 'royal_silk_coral'
+  | 'glowing_pearl_node'
+  | 'starlight_coral_node'
+  | 'seafoam_essence_node'
+  | 'sunset_amber_node'
   | 'shop_wall'
   | 'shop_wall_t2'
   | 'boutique_backwall'
@@ -212,7 +252,8 @@ type PropKind =
   | 'lantern_post'
   | 'rug_pink'
   | 'rug_teal'
-  | 'rug_gold';
+  | 'rug_gold'
+  | 'newsstand_kiosk';
 
 interface PropObject {
   id: string;
@@ -297,6 +338,8 @@ interface Particle {
   maxLife: number;
   color: string;
   size: number;
+  shape?: 'square' | 'star' | 'bubble';
+  gravity?: number;
 }
 
 interface FloatingText {
@@ -331,6 +374,10 @@ type ItemKind =
   | 'dyes'
   | 'golden_pearls'
   | 'royal_silk'
+  | 'glowing_pearls'
+  | 'starlight_coral'
+  | 'seafoam_essence'
+  | 'sunset_amber'
   | 'dock_plank'
   | 'shop_wall'
   | 'mannequin'
@@ -348,6 +395,10 @@ const DEFAULT_INVENTORY: InventoryCounts = {
   dyes: 1,
   golden_pearls: 0,
   royal_silk: 0,
+  glowing_pearls: 0,
+  starlight_coral: 0,
+  seafoam_essence: 0,
+  sunset_amber: 0,
   dock_plank: 8,
   shop_wall: 1,
   mannequin: 1,
@@ -958,21 +1009,27 @@ function getHairMatrix(style: HairStyle, dir: 'down' | 'up' | 'side'): string[] 
   }
 }
 
-function itemCacheSig(item: ClothingItem | null | undefined): string {
+function itemCacheSig(item: ClothingItem | null | undefined, sunsetPhase = 0): string {
   if (!item) return '0';
-  return `${item.pixels}:${item.palette.join(',')}`;
+  const effTag = item.effect === 'sunset_amber' ? `:sa${sunsetPhase}` : '';
+  return `${item.pixels}:${item.palette.join(',')}${effTag}`;
 }
 
-function renderCharacterSprite(appearance: CharacterAppearance, dir: Direction, frame: number): HTMLCanvasElement {
+function renderCharacterSprite(
+  appearance: CharacterAppearance,
+  dir: Direction,
+  frame: number,
+  sunsetPhase = 0
+): HTMLCanvasElement {
   const key = [
     appearance.skinId,
     appearance.hairStyle,
     appearance.hairColorId,
-    itemCacheSig(appearance.hat),
-    itemCacheSig(appearance.top),
-    itemCacheSig(appearance.bottom),
-    itemCacheSig(appearance.dress),
-    itemCacheSig(appearance.shoes),
+    itemCacheSig(appearance.hat, sunsetPhase),
+    itemCacheSig(appearance.top, sunsetPhase),
+    itemCacheSig(appearance.bottom, sunsetPhase),
+    itemCacheSig(appearance.dress, sunsetPhase),
+    itemCacheSig(appearance.shoes, sunsetPhase),
     dir,
     frame,
   ].join('|');
@@ -980,7 +1037,7 @@ function renderCharacterSprite(appearance: CharacterAppearance, dir: Direction, 
   const cached = spriteCache.get(key);
   if (cached) return cached;
 
-  if (spriteCache.size > 900) {
+  if (spriteCache.size > 1400) {
     spriteCache.clear();
   }
 
@@ -1033,7 +1090,8 @@ function renderCharacterSprite(appearance: CharacterAppearance, dir: Direction, 
       appearance.shoes,
       dir,
       frame,
-      dir === 'up' ? 'feet' : 'all'
+      dir === 'up' ? 'feet' : 'all',
+      sunsetPhase
     );
   }
 
@@ -1051,13 +1109,13 @@ function renderCharacterSprite(appearance: CharacterAppearance, dir: Direction, 
 
   // 4. Bottom + Top OR Full Dress
   if (appearance.dress) {
-    drawClothingItemOnSprite(ctx, appearance.dress, dir, frame);
+    drawClothingItemOnSprite(ctx, appearance.dress, dir, frame, 'all', sunsetPhase);
   } else {
     if (appearance.bottom) {
-      drawClothingItemOnSprite(ctx, appearance.bottom, dir, frame);
+      drawClothingItemOnSprite(ctx, appearance.bottom, dir, frame, 'all', sunsetPhase);
     }
     if (appearance.top) {
-      drawClothingItemOnSprite(ctx, appearance.top, dir, frame);
+      drawClothingItemOnSprite(ctx, appearance.top, dir, frame, 'all', sunsetPhase);
     }
   }
 
@@ -1071,12 +1129,12 @@ function renderCharacterSprite(appearance: CharacterAppearance, dir: Direction, 
 
   // 6b. Back Wings overlay when facing away (up) so wings display across the back
   if (dir === 'up' && appearance.shoes) {
-    drawClothingItemOnSprite(ctx, appearance.shoes, dir, frame, 'wings');
+    drawClothingItemOnSprite(ctx, appearance.shoes, dir, frame, 'wings', sunsetPhase);
   }
 
   // 7. Hat Layer
   if (appearance.hat) {
-    drawClothingItemOnSprite(ctx, appearance.hat, dir, frame);
+    drawClothingItemOnSprite(ctx, appearance.hat, dir, frame, 'all', sunsetPhase);
   }
 
   spriteCache.set(key, canvas);
@@ -1215,14 +1273,15 @@ function getTileSprite(type: TileType, variant: number, waterFrame: number): HTM
   return c;
 }
 
-function getMannequinSprite(listing?: MannequinListing | null): HTMLCanvasElement {
+function getMannequinSprite(listing?: MannequinListing | null, sunsetPhase = 0): HTMLCanvasElement {
+  const effTag = listing?.item?.effect === 'sunset_amber' ? `|sa${sunsetPhase}` : '';
   const key = listing?.item
-    ? `mannequin_v5|${listing.item.slot}|${listing.item.pixels}|${listing.item.palette.join(',')}`
+    ? `mannequin_v5|${listing.item.slot}|${listing.item.pixels}|${listing.item.palette.join(',')}${effTag}`
     : 'mannequin_v5|empty';
   const existing = tileCache.get(key);
   if (existing) return existing;
 
-  if (tileCache.size > 600) {
+  if (tileCache.size > 900) {
     tileCache.clear();
   }
 
@@ -1269,16 +1328,16 @@ function getMannequinSprite(listing?: MannequinListing | null): HTMLCanvasElemen
     ctx.fillRect(7, 7, 4, 7);
     ctx.fillStyle = '#d49a60';
     ctx.fillRect(7, 11, 4, 1);
-    drawClothingOnMannequin(ctx, listing.item);
+    drawClothingOnMannequin(ctx, listing.item, sunsetPhase);
   }
 
   tileCache.set(key, c);
   return c;
 }
 
-function getPropSprite(prop: PropObject, swayFrame = 0): HTMLCanvasElement {
+function getPropSprite(prop: PropObject, swayFrame = 0, sunsetPhase = 0): HTMLCanvasElement {
   if (prop.kind === 'mannequin') {
-    return getMannequinSprite(prop.listing);
+    return getMannequinSprite(prop.listing, sunsetPhase);
   }
 
   const harvested = prop.respawnTimer > 0;
@@ -1557,6 +1616,76 @@ function getPropSprite(prop: PropObject, swayFrame = 0): HTMLCanvasElement {
     return c;
   }
 
+  if (prop.kind === 'newsstand_kiosk') {
+    const nKey = 'newsstand_kiosk_v1';
+    const cached = tileCache.get(nKey);
+    if (cached) return cached;
+
+    const [nc, nctx] = makeOffscreen(48, 36);
+    // Soft ground shadow
+    nctx.fillStyle = 'rgba(28, 18, 10, 0.28)';
+    nctx.fillRect(2, 32, 44, 4);
+    // Outer wooden kiosk frame
+    nctx.fillStyle = '#3b1e0a';
+    nctx.fillRect(3, 6, 42, 27);
+    // Cream back display board & wooden pillars
+    nctx.fillStyle = '#f5e1bc';
+    nctx.fillRect(6, 12, 36, 12);
+    nctx.fillStyle = '#8c5326';
+    nctx.fillRect(4, 10, 3, 22);
+    nctx.fillRect(41, 10, 3, 22);
+    // Lower wooden counter with trim
+    nctx.fillStyle = '#a86531';
+    nctx.fillRect(5, 22, 38, 10);
+    nctx.fillStyle = '#d4965b';
+    nctx.fillRect(4, 21, 40, 3);
+    nctx.fillStyle = '#5c3314';
+    nctx.fillRect(6, 25, 36, 1);
+    nctx.fillRect(6, 29, 36, 1);
+    // Striped coral & cream awning roof
+    const awningCols = ['#e11d48', '#fff5e4', '#0ea5e9', '#fff5e4', '#e11d48', '#fff5e4', '#0ea5e9', '#fff5e4'];
+    for (let i = 0; i < 8; i++) {
+      nctx.fillStyle = awningCols[i];
+      nctx.fillRect(2 + i * 5 + 2, 4, 5, 7);
+      nctx.fillStyle = i % 2 === 0 ? '#9f1239' : '#e6cfa3';
+      nctx.fillRect(2 + i * 5 + 2, 11, 5, 2);
+    }
+    nctx.fillStyle = '#3b1e0a';
+    nctx.fillRect(3, 3, 42, 1);
+    // Colorful fashion magazine covers displayed on rack
+    const covers = ['#f43f5e', '#38bdf8', '#a855f7', '#f59e0b', '#ec4899', '#14b8a6'];
+    for (let i = 0; i < 6; i++) {
+      const mx = 8 + i * 5;
+      nctx.fillStyle = '#2b1508';
+      nctx.fillRect(mx, 14, 4, 6);
+      nctx.fillStyle = covers[i];
+      nctx.fillRect(mx + 1, 15, 2, 4);
+      nctx.fillStyle = '#ffffff';
+      nctx.fillRect(mx + 1, 15, 2, 1);
+    }
+    // Stacked newsprints on counter
+    nctx.fillStyle = '#fff8e7';
+    nctx.fillRect(10, 20, 7, 2);
+    nctx.fillRect(31, 20, 7, 2);
+    // Hanging brass lantern on right post
+    nctx.fillStyle = '#3b1e0a';
+    nctx.fillRect(41, 13, 4, 5);
+    nctx.fillStyle = '#fde047';
+    nctx.fillRect(42, 14, 2, 3);
+    nctx.fillStyle = '#ffffff';
+    nctx.fillRect(42, 14, 1, 1);
+    // Top gold plaque sign
+    nctx.fillStyle = '#3b1e0a';
+    nctx.fillRect(15, 0, 18, 5);
+    nctx.fillStyle = '#f5cb52';
+    nctx.fillRect(16, 1, 16, 3);
+    nctx.fillStyle = '#5c2b0e';
+    nctx.fillRect(18, 2, 12, 1);
+
+    tileCache.set(nKey, nc);
+    return nc;
+  }
+
   if (prop.kind === 'boutique_pillar_l' || prop.kind === 'boutique_pillar_r') {
     const tier = clampShopTier(prop.shopTier);
     const pKey = `${prop.kind}|t${tier}`;
@@ -1805,6 +1934,68 @@ function getPropSprite(prop: PropObject, swayFrame = 0): HTMLCanvasElement {
       ctx.fillStyle = '#e09eff';
       ctx.fillRect(5, 5, 1, 3);
       ctx.fillRect(9, 6, 1, 3);
+    }
+  } else if (prop.kind === 'glowing_pearl_node') {
+    if (harvested) {
+      ctx.fillStyle = '#4ab5a9';
+      ctx.fillRect(6, 10, 4, 2);
+    } else {
+      ctx.fillStyle = '#0e4d64';
+      ctx.fillRect(3, 7, 10, 6);
+      ctx.fillStyle = '#22d3ee';
+      ctx.fillRect(4, 8, 8, 4);
+      ctx.fillStyle = '#cffafe';
+      ctx.fillRect(6, 5, 4, 5);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(7, 6, 2, 2);
+    }
+  } else if (prop.kind === 'starlight_coral_node') {
+    if (harvested) {
+      ctx.fillStyle = '#4ab5a9';
+      ctx.fillRect(6, 10, 4, 2);
+    } else {
+      ctx.fillStyle = '#4a1d42';
+      ctx.fillRect(4, 5, 8, 8);
+      ctx.fillStyle = '#fb7185';
+      ctx.fillRect(5, 6, 2, 6);
+      ctx.fillRect(9, 5, 2, 7);
+      ctx.fillRect(7, 7, 2, 5);
+      ctx.fillStyle = '#fde047';
+      ctx.fillRect(5, 4, 2, 2);
+      ctx.fillRect(9, 4, 2, 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(7, 6, 1, 1);
+    }
+  } else if (prop.kind === 'seafoam_essence_node') {
+    if (harvested) {
+      ctx.fillStyle = '#4ab5a9';
+      ctx.fillRect(6, 10, 4, 2);
+    } else {
+      ctx.fillStyle = '#134e4a';
+      ctx.fillRect(5, 4, 6, 9);
+      ctx.fillStyle = '#2dd4bf';
+      ctx.fillRect(6, 5, 4, 7);
+      ctx.fillStyle = '#99f6e4';
+      ctx.fillRect(4, 7, 2, 3);
+      ctx.fillRect(10, 6, 2, 3);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(7, 6, 2, 2);
+    }
+  } else if (prop.kind === 'sunset_amber_node') {
+    if (harvested) {
+      ctx.fillStyle = '#4ab5a9';
+      ctx.fillRect(6, 10, 4, 2);
+    } else {
+      ctx.fillStyle = '#5c2210';
+      ctx.fillRect(4, 5, 8, 8);
+      ctx.fillStyle = '#f97316';
+      ctx.fillRect(5, 6, 6, 6);
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillRect(6, 6, 4, 4);
+      ctx.fillStyle = '#fb7185';
+      ctx.fillRect(5, 10, 6, 2);
+      ctx.fillStyle = '#fffbeb';
+      ctx.fillRect(7, 7, 1, 2);
     }
   } else if (prop.kind === 'shell_pink') {
     if (harvested) {
@@ -2071,6 +2262,30 @@ function drawItemIconCanvas(canvas: HTMLCanvasElement, kind: ItemKind | 'rare_ou
       ctx,
       ['................', '......OOOO......', '....OORRRROO....', '...ORRRRRRRRO...', '..ORRLLLLLLRRO..', '..ORRRRRRRRRRO..', '..OODDDDDDDDOO..', '...ORRRRRRRRO...', '....OORRRROO....', '......OOOO......', '................', '................', '................', '................', '................', '................'],
       { O: '#3b154d', R: '#a855f7', L: '#e9d5ff', D: '#ffd86b' }
+    );
+  } else if (kind === 'glowing_pearls') {
+    drawPixelMatrix(
+      ctx,
+      ['................', '.....OOOOOO.....', '...OOCCCCCCOO...', '..OCCCCCCCCCCOO.', '..OCCWWWWWWCCOO.', '..OCWWHHHWWWCCO.', '..OCCWWWWWWCCOO.', '...OOCCCCCCOO...', '....OODDDDOO....', '.....OOOOOO.....', '................', '................', '................', '................', '................', '................'],
+      { O: '#0e4d64', C: '#22d3ee', D: '#0891b2', W: '#cffafe', H: '#ffffff' }
+    );
+  } else if (kind === 'starlight_coral') {
+    drawPixelMatrix(
+      ctx,
+      ['................', '....OO....OO....', '...OYYO..OYYO...', '...OPPO..OPPO...', '...OPPOO.OPPO...', '..OOPPPPPPPOOO..', '..OPPPWWWWPPPO..', '...OPPPPPPPPO...', '....OOPPPPOO....', '.....OOOOOO.....', '................', '................', '................', '................', '................', '................'],
+      { O: '#4a1d42', P: '#fb7185', Y: '#fde047', W: '#ffffff' }
+    );
+  } else if (kind === 'seafoam_essence') {
+    drawPixelMatrix(
+      ctx,
+      ['................', '......OOOO......', '.....OCCCCO.....', '......OOOO......', '....OOTTTTOO....', '...OTTTTTTTTO...', '..OTLLLLLLLLTO..', '..OTLLHHHHLLTO..', '..OTTTTTTTTTTO..', '...OTTTTTTTTO...', '....OOOOOOOO....', '................', '................', '................', '................', '................'],
+      { O: '#134e4a', C: '#a7f3d0', T: '#14b8a6', L: '#5eead4', H: '#ffffff' }
+    );
+  } else if (kind === 'sunset_amber') {
+    drawPixelMatrix(
+      ctx,
+      ['................', '......OOOO......', '....OOYYYYOO....', '...OYYYYYYYYO...', '..OYYHHHHHHYYO..', '..OYYYYAAAAYYO..', '..OYYAAAAAAPP0..', '...OAPPPPPPAO...', '....OOPPPPOO....', '......OOOO......', '................', '................', '................', '................', '................', '................'],
+      { O: '#5c2210', Y: '#fbbf24', H: '#fffbeb', A: '#f97316', P: '#fb7185', '0': '#5c2210' }
     );
   } else if (kind === 'dyes') {
     drawPixelMatrix(
@@ -2359,7 +2574,31 @@ function buildWorld() {
     for (let c = saraCoast - 4; c <= SARA_BOUTIQUE_COL + 6; c++) markOccupied(c, r);
   }
 
+  // 1d. Public Island Newsstand Plaza (between Spawn & Runway)
+  for (let r = NEWSSTAND_ROW; r <= NEWSSTAND_ROW + 2; r++) {
+    for (let c = NEWSSTAND_COL - 1; c <= NEWSSTAND_COL + 3; c++) {
+      tiles[r][c] = TileType.DIRT_PATH;
+    }
+  }
+  for (let r = NEWSSTAND_ROW - 1; r <= NEWSSTAND_ROW + 3; r++) {
+    for (let c = NEWSSTAND_COL - 2; c <= NEWSSTAND_COL + 4; c++) markOccupied(c, r);
+  }
+
   let propCounter = 0;
+
+  // Place Public Island Newsstand Kiosk (Browse, Buy & Publish Fashion Magazines!)
+  props.push({
+    id: 'island_newsstand',
+    kind: 'newsstand_kiosk',
+    col: NEWSSTAND_COL,
+    row: NEWSSTAND_ROW,
+    x: NEWSSTAND_CENTER_X,
+    y: (NEWSSTAND_ROW + 1) * TILE_SIZE + 12,
+    solid: true,
+    radius: 14,
+    variant: 0,
+    respawnTimer: 0,
+  });
 
   // Place Lina's 4x3 Open-Front Boutique Structures, Display Table & Mannequins
   props.push(
@@ -2561,6 +2800,53 @@ function buildWorld() {
     }
   }
 
+  // Place Deep Ocean Rare Dye Nodes (accessible by boat & companion pets!)
+  const deepOceanDyeSpots: Array<{
+    c: number;
+    r: number;
+    kind: 'glowing_pearl_node' | 'starlight_coral_node' | 'seafoam_essence_node' | 'sunset_amber_node';
+  }> = [
+    // Open Deep Ocean (accessible with any Boat + Pet)
+    { c: 92, r: 22, kind: 'glowing_pearl_node' },
+    { c: 97, r: 30, kind: 'starlight_coral_node' },
+    { c: 103, r: 25, kind: 'seafoam_essence_node' },
+    { c: 108, r: 36, kind: 'sunset_amber_node' },
+    { c: 91, r: 44, kind: 'seafoam_essence_node' },
+    { c: 98, r: 50, kind: 'glowing_pearl_node' },
+    { c: 105, r: 58, kind: 'sunset_amber_node' },
+    { c: 94, r: 66, kind: 'starlight_coral_node' },
+    { c: 101, r: 74, kind: 'glowing_pearl_node' },
+    { c: 108, r: 82, kind: 'seafoam_essence_node' },
+    { c: 95, r: 92, kind: 'sunset_amber_node' },
+    { c: 104, r: 99, kind: 'starlight_coral_node' },
+    // Outer Reef Deep Waters
+    { c: 120, r: 28, kind: 'glowing_pearl_node' },
+    { c: 126, r: 38, kind: 'starlight_coral_node' },
+    { c: 146, r: 44, kind: 'seafoam_essence_node' },
+    { c: 150, r: 55, kind: 'sunset_amber_node' },
+    { c: 122, r: 70, kind: 'sunset_amber_node' },
+    { c: 147, r: 71, kind: 'glowing_pearl_node' },
+    { c: 132, r: 82, kind: 'seafoam_essence_node' },
+    { c: 144, r: 88, kind: 'starlight_coral_node' },
+  ];
+  for (const ds of deepOceanDyeSpots) {
+    const dt = tiles[ds.r]?.[ds.c];
+    if ((dt === TileType.DEEP_WATER || dt === TileType.REEF_WATER) && !occupied.has(`${ds.c},${ds.r}`)) {
+      props.push({
+        id: `deep_dye_${propCounter++}`,
+        kind: ds.kind,
+        col: ds.c,
+        row: ds.r,
+        x: ds.c * TILE_SIZE + 8,
+        y: ds.r * TILE_SIZE + 10,
+        solid: false,
+        radius: 5,
+        variant: 0,
+        respawnTimer: 0,
+      });
+    }
+  }
+
   // Island Palms, Cotton Bushes, Dye Bushes, Rocky Cliffs
   for (let r = 2; r < MAP_ROWS - 2; r++) {
     const maxLandCol = Math.min(MAP_COLS - 2, coastColAt(r));
@@ -2744,6 +3030,16 @@ const WardrobePreviewCanvas: React.FC<{
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       if (walking) t += dt * 7;
+      const timeSec = now / 1000;
+      const pieces = [
+        appearance.hat,
+        appearance.top,
+        appearance.bottom,
+        appearance.dress,
+        appearance.shoes,
+      ];
+      const effects = getItemsActiveEffects(pieces);
+      const sunsetPhase = effects.includes('sunset_amber') ? Math.floor(timeSec * 7) % 12 : 0;
 
       const c = canvasRef.current;
       if (c) {
@@ -2752,21 +3048,74 @@ const WardrobePreviewCanvas: React.FC<{
           ctx.imageSmoothingEnabled = false;
           ctx.clearRect(0, 0, c.width, c.height);
 
-          ctx.fillStyle = '#bfe8f5';
-          ctx.fillRect(0, 0, c.width, 74);
-          ctx.fillStyle = '#48b1cc';
-          ctx.fillRect(0, 74, c.width, 16);
-          ctx.fillStyle = '#ebd08a';
-          ctx.fillRect(0, 90, c.width, c.height - 90);
-          ctx.fillStyle = '#d9b96e';
-          ctx.fillRect(0, 90, c.width, 3);
+          const hasGlow = effects.includes('glowing_pearls');
+          const hasNeon = hasNightNeonItems(pieces);
+          const rainCfg = getActiveRainConfig(pieces);
+          if (hasGlow || hasNeon) {
+            ctx.fillStyle = '#12264f';
+            ctx.fillRect(0, 0, c.width, 74);
+            ctx.fillStyle = '#fef08a';
+            ctx.fillRect(16, 14, 2, 2);
+            ctx.fillRect(98, 22, 2, 2);
+            ctx.fillStyle = '#1b4770';
+            ctx.fillRect(0, 74, c.width, 16);
+            ctx.fillStyle = '#9c8663';
+            ctx.fillRect(0, 90, c.width, c.height - 90);
+            ctx.fillStyle = '#756347';
+            ctx.fillRect(0, 90, c.width, 3);
+          } else if (rainCfg) {
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(0, 0, c.width, 74);
+            ctx.fillStyle = '#33658a';
+            ctx.fillRect(0, 74, c.width, 16);
+            ctx.fillStyle = '#c9b37d';
+            ctx.fillRect(0, 90, c.width, c.height - 90);
+            ctx.fillStyle = '#a89362';
+            ctx.fillRect(0, 90, c.width, 3);
+          } else {
+            ctx.fillStyle = '#bfe8f5';
+            ctx.fillRect(0, 0, c.width, 74);
+            ctx.fillStyle = '#48b1cc';
+            ctx.fillRect(0, 74, c.width, 16);
+            ctx.fillStyle = '#ebd08a';
+            ctx.fillRect(0, 90, c.width, c.height - 90);
+            ctx.fillStyle = '#d9b96e';
+            ctx.fillRect(0, 90, c.width, 3);
+          }
 
           const frame = walking ? Math.floor(t) % 4 : 0;
-          const sprite = renderCharacterSprite(appearance, dir, frame);
+          const sprite = renderCharacterSprite(appearance, dir, frame, sunsetPhase);
 
           ctx.fillStyle = 'rgba(46, 26, 14, 0.25)';
           ctx.fillRect(42, 114, 44, 10);
           ctx.drawImage(sprite, 24, 4, 80, 120);
+
+          if (hasGlow) {
+            drawGlowingPearlsSpriteOverlay(ctx, pieces, dir, frame, 24, 4, 5, timeSec, 0.9);
+          }
+          if (hasNeon) {
+            drawNightNeonSpriteOverlay(ctx, pieces, dir, frame, 24, 4, 5, timeSec, 0.95);
+          }
+          if (rainCfg) {
+            drawRainReactiveOverlay(ctx, pieces, dir, frame, 24, 4, 5, 1);
+            ctx.fillStyle = 'rgba(219, 234, 254, 0.65)';
+            for (let i = 0; i < 12; i++) {
+              const rx = ((i * 29 + timeSec * 40) % (c.width + 12)) - 6;
+              const ry = ((i * 37 + timeSec * 145) % (c.height + 12)) - 6;
+              ctx.fillRect(Math.floor(rx), Math.floor(ry), 1.5, 6);
+            }
+          }
+          if (effects.includes('starlight_coral') || effects.includes('seafoam_essence')) {
+            drawOutfitAmbientEffects(
+              ctx,
+              effects,
+              64,
+              74,
+              4,
+              timeSec,
+              walking ? 'player' : 'preview'
+            );
+          }
         }
       }
       raf = requestAnimationFrame(draw);
@@ -2858,8 +3207,26 @@ interface SavedGameData {
   equippedBoat?: BoatKind | null;
   ownedPets?: PetKind[];
   equippedPet?: PetKind | null;
+  ownedMagazineIds?: string[];
   totalSales?: number;
   editionMintCounts?: Record<string, number>;
+}
+
+function loadSavedSnapshots(): LookbookSnapshot[] {
+  try {
+    const raw = localStorage.getItem(SNAPSHOTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (s): s is LookbookSnapshot =>
+          Boolean(s && typeof s.id === 'string' && typeof s.dataUrl === 'string' && s.dataUrl.startsWith('data:image/'))
+      )
+      .slice(0, 18);
+  } catch {
+    return [];
+  }
 }
 
 function loadSavedGame(): SavedGameData | null {
@@ -2983,7 +3350,17 @@ export default function App() {
   const [editionMintCounts, setEditionMintCounts] = useState<Record<string, number>>(
     initialSave?.editionMintCounts || {}
   );
-  const [nearLandmarkPrompt, setNearLandmarkPrompt] = useState<'runway' | 'boat' | null>(null);
+  const [ownedMagazineIds, setOwnedMagazineIds] = useState<string[]>(
+    initialSave?.ownedMagazineIds || []
+  );
+  const ownedMagazineIdsRef = useRef<string[]>(ownedMagazineIds);
+  const [magazines, setMagazines] = useState<CloudMagazine[]>([]);
+  const [snapshots, setSnapshots] = useState<LookbookSnapshot[]>(() => loadSavedSnapshots());
+  const [newsstandOpen, setNewsstandOpen] = useState<boolean>(false);
+  const [lookbookOpen, setLookbookOpen] = useState<boolean>(false);
+  const [cameraModeOpen, setCameraModeOpen] = useState<boolean>(false);
+  const [cameraFlash, setCameraFlash] = useState<boolean>(false);
+  const [nearLandmarkPrompt, setNearLandmarkPrompt] = useState<'runway' | 'boat' | 'newsstand' | null>(null);
   const [manageShopId, setManageShopId] = useState<string | null>(null);
   const [nearOwnShopId, setNearOwnShopId] = useState<string | null>(null);
   const [movingShop, setMovingShop] = useState<{
@@ -3024,6 +3401,10 @@ export default function App() {
 
   // Mobile / iPad Analog Joystick & Action Button (visible by default + toggleable)
   const [showTouchControls, setShowTouchControls] = useState<boolean>(true);
+  const [timeOfDayMode, setTimeOfDayMode] = useState<'auto' | 'day' | 'night'>('auto');
+  const timeOfDayModeRef = useRef<'auto' | 'day' | 'night'>('auto');
+  const [weatherMode, setWeatherMode] = useState<'auto' | 'sunny' | 'rain'>('auto');
+  const weatherModeRef = useRef<'auto' | 'sunny' | 'rain'>('auto');
   const [joystickThumb, setJoystickThumb] = useState<{ x: number; y: number; active: boolean }>({
     x: 0,
     y: 0,
@@ -3298,6 +3679,18 @@ export default function App() {
   }, [movingShop]);
 
   useEffect(() => {
+    timeOfDayModeRef.current = timeOfDayMode;
+  }, [timeOfDayMode]);
+
+  useEffect(() => {
+    weatherModeRef.current = weatherMode;
+  }, [weatherMode]);
+
+  useEffect(() => {
+    ownedMagazineIdsRef.current = ownedMagazineIds;
+  }, [ownedMagazineIds]);
+
+  useEffect(() => {
     modalOpenRef.current =
       !joinedIsland ||
       wardrobeOpen ||
@@ -3306,6 +3699,8 @@ export default function App() {
       shopsModalOpen ||
       runwayModalOpen ||
       boatModalOpen ||
+      newsstandOpen ||
+      lookbookOpen ||
       manageShopId !== null ||
       activeStallPropId !== null ||
       buyPreviewPropId !== null;
@@ -3323,6 +3718,8 @@ export default function App() {
     shopsModalOpen,
     runwayModalOpen,
     boatModalOpen,
+    newsstandOpen,
+    lookbookOpen,
     manageShopId,
     activeStallPropId,
     buyPreviewPropId,
@@ -3381,6 +3778,7 @@ export default function App() {
           equippedBoat,
           ownedPets,
           equippedPet,
+          ownedMagazineIds,
           totalSales,
           editionMintCounts,
         };
@@ -3406,6 +3804,7 @@ export default function App() {
             equippedBoat,
             ownedPets,
             equippedPet,
+            ownedMagazineIds,
             totalSales,
             editionMintCounts,
           },
@@ -3705,6 +4104,7 @@ export default function App() {
             equippedBoat: equippedBoatRef.current,
             ownedPets: ownedPetsRef.current,
             equippedPet: equippedPetRef.current,
+            ownedMagazineIds: ownedMagazineIdsRef.current,
             totalSales: totalSalesRef.current,
             editionMintCounts: editionMintCountsRef.current,
           },
@@ -3967,6 +4367,10 @@ export default function App() {
       if (active) setActiveAuction(auction);
     });
 
+    const unsubMagazines = subscribeMagazines((mags) => {
+      if (active) setMagazines(mags);
+    });
+
     const handleUnload = () => {
       void removeOnlinePlayer(playerId);
     };
@@ -3979,6 +4383,7 @@ export default function App() {
       unsubWorld();
       unsubOnline();
       unsubAuction();
+      unsubMagazines();
       window.removeEventListener('beforeunload', handleUnload);
       window.removeEventListener('pagehide', handleUnload);
       void removeOnlinePlayer(playerId);
@@ -4071,6 +4476,7 @@ export default function App() {
       let activeEquippedPet = equippedPetRef.current;
       let activeTotalSales = totalSalesRef.current;
       let activeMintCounts = editionMintCountsRef.current;
+      let activeOwnedMagazines = ownedMagazineIdsRef.current;
 
       if (existing) {
         activeAppearance = existing.appearance as CharacterAppearance;
@@ -4097,6 +4503,7 @@ export default function App() {
         activeEquippedPet = existing.equippedPet ? normalizePetKind(existing.equippedPet) : null;
         activeTotalSales = existing.totalSales || 0;
         activeMintCounts = existing.editionMintCounts || {};
+        activeOwnedMagazines = Array.isArray(existing.ownedMagazineIds) ? existing.ownedMagazineIds : [];
         lastSeenSaleAtRef.current = existing.lastSale?.at || 0;
 
         setAppearance(activeAppearance);
@@ -4109,6 +4516,7 @@ export default function App() {
         setEquippedPet(activeEquippedPet);
         setTotalSales(activeTotalSales);
         setEditionMintCounts(activeMintCounts);
+        setOwnedMagazineIds(activeOwnedMagazines);
 
         playerRef.current.x = Math.max(16, Math.min(WORLD_W - 16, existing.x));
         playerRef.current.y = Math.max(16, Math.min(WORLD_H - 16, existing.y));
@@ -4135,6 +4543,7 @@ export default function App() {
               equippedBoat: activeEquippedBoat,
               ownedPets: activeOwnedPets,
               equippedPet: activeEquippedPet,
+              ownedMagazineIds: activeOwnedMagazines,
               totalSales: activeTotalSales,
               editionMintCounts: activeMintCounts,
             },
@@ -4158,6 +4567,7 @@ export default function App() {
             equippedBoat: activeEquippedBoat,
             ownedPets: activeOwnedPets,
             equippedPet: activeEquippedPet,
+            ownedMagazineIds: activeOwnedMagazines,
             totalSales: activeTotalSales,
             editionMintCounts: activeMintCounts,
           },
@@ -4250,6 +4660,14 @@ export default function App() {
       c <= RUNWAY_STAGE_COL + 7 &&
       r >= RUNWAY_STAGE_ROW - 1 &&
       r <= RUNWAY_STAGE_ROW + 4
+    ) {
+      return true;
+    }
+    if (
+      c >= NEWSSTAND_COL - 1 &&
+      c <= NEWSSTAND_COL + 3 &&
+      r >= NEWSSTAND_ROW - 1 &&
+      r <= NEWSSTAND_ROW + 2
     ) {
       return true;
     }
@@ -4824,6 +5242,19 @@ export default function App() {
         return;
       }
 
+      // 1d. Public Island Newsstand Kiosk interaction
+      const targetOnNewsstand =
+        col >= NEWSSTAND_COL - 1 &&
+        col <= NEWSSTAND_COL + 3 &&
+        row >= NEWSSTAND_ROW - 1 &&
+        row <= NEWSSTAND_ROW + 2;
+      const nearNewsstand = Math.hypot(p.x - NEWSSTAND_CENTER_X, p.y - NEWSSTAND_CENTER_Y) <= TILE_SIZE * 3.8;
+      if ((targetOnNewsstand && Math.hypot(tileCenterX - p.x, tileCenterY - p.y) <= TILE_SIZE * 4.8) || (targetCol === undefined && nearNewsstand)) {
+        sfx.playClick();
+        setNewsstandOpen(true);
+        return;
+      }
+
       // 2. Building Placement when buildable item is selected
       const activeList = hotbarModeRef.current === 'gather' ? HOTBAR_GATHER : HOTBAR_BUILD;
       const activeDecorDef =
@@ -5143,6 +5574,69 @@ export default function App() {
           sfx.playChime();
           return;
         }
+
+        if (
+          targetProp.kind === 'glowing_pearl_node' ||
+          targetProp.kind === 'starlight_coral_node' ||
+          targetProp.kind === 'seafoam_essence_node' ||
+          targetProp.kind === 'sunset_amber_node'
+        ) {
+          if (!isBoatingRef.current) {
+            targetProp.respawnTimer = 0;
+            spawnFloatingText(targetProp.x, targetProp.y - 14, 'Sail by Boat to Harvest!', '#9cebff');
+            return;
+          }
+          const hasPetBonus = equippedPetRef.current ? 1 : 0;
+          const isReefWater = worldRef.current.tiles[targetProp.row]?.[targetProp.col] === TileType.REEF_WATER;
+          const amt = 1 + hasPetBonus + (isReefWater ? skiffReefLuck : 0);
+          const nodeMap: Record<
+            'glowing_pearl_node' | 'starlight_coral_node' | 'seafoam_essence_node' | 'sunset_amber_node',
+            { invKey: OutfitEffectType; label: string; pColor: string; tColor: string }
+          > = {
+            glowing_pearl_node: {
+              invKey: 'glowing_pearls',
+              label: 'Glowing Pearl',
+              pColor: '#67e8f9',
+              tColor: '#cffafe',
+            },
+            starlight_coral_node: {
+              invKey: 'starlight_coral',
+              label: 'Starlight Coral',
+              pColor: '#fde047',
+              tColor: '#fef08a',
+            },
+            seafoam_essence_node: {
+              invKey: 'seafoam_essence',
+              label: 'Seafoam Essence',
+              pColor: '#5eead4',
+              tColor: '#ccfbf1',
+            },
+            sunset_amber_node: {
+              invKey: 'sunset_amber',
+              label: 'Sunset Amber',
+              pColor: '#fb923c',
+              tColor: '#ffedd5',
+            },
+          };
+          const meta = nodeMap[targetProp.kind];
+          setInventory((prev) => ({
+            ...prev,
+            [meta.invKey]: (prev[meta.invKey] || 0) + amt,
+          }));
+          setGold((g) => g + 20);
+          if (hasPetBonus) {
+            localPetHeartUntilRef.current = Date.now() + 2600;
+          }
+          spawnParticles(targetProp.x, targetProp.y - 4, meta.pColor, 14);
+          spawnFloatingText(
+            targetProp.x,
+            targetProp.y - 16,
+            hasPetBonus ? `+${amt} ${meta.label}! (Pet Dive!)` : `+${amt} ${meta.label}!`,
+            meta.tColor
+          );
+          sfx.playChime();
+          return;
+        }
       }
 
       // 4. Fishing / Watering actions
@@ -5294,11 +5788,21 @@ export default function App() {
     }));
   };
 
-  // Craft Custom Design Studio Piece
-  const handleCraftDesignItem = (item: ClothingItem, fabricCost: number, equipNow: boolean) => {
+  // Craft Custom Design Studio Piece (with optional Deep-Sea Dye Effect Infusion)
+  const handleCraftDesignItem = (
+    item: ClothingItem,
+    fabricCost: number,
+    equipNow: boolean,
+    infuseEffect: OutfitEffectType | null
+  ) => {
     if (inventoryRef.current.fabric < fabricCost || ownedItemsRef.current.length >= 50) return;
+    if (infuseEffect && (inventoryRef.current[infuseEffect] || 0) < 1) return;
     sfx.playChime();
-    setInventory((prev) => ({ ...prev, fabric: Math.max(0, prev.fabric - fabricCost) }));
+    setInventory((prev) => ({
+      ...prev,
+      fabric: Math.max(0, prev.fabric - fabricCost),
+      ...(infuseEffect ? { [infuseEffect]: Math.max(0, (prev[infuseEffect] || 0) - 1) } : {}),
+    }));
     if (item.editionId) {
       setEditionMintCounts((prev) => ({ ...prev, [item.editionId!]: item.editionSerial || 1 }));
     }
@@ -5307,8 +5811,14 @@ export default function App() {
       equipItem(item);
     }
     setDesignStudioOpen(false);
-    spawnParticles(playerRef.current.x, playerRef.current.y - 8, '#f58eb2', 12);
-    spawnFloatingText(playerRef.current.x, playerRef.current.y - 22, `Designed ${item.name}!`, '#ffd4e2');
+    const effectMeta = getOutfitEffectMeta(infuseEffect);
+    spawnParticles(playerRef.current.x, playerRef.current.y - 8, effectMeta?.accentHex || '#f58eb2', 14);
+    spawnFloatingText(
+      playerRef.current.x,
+      playerRef.current.y - 22,
+      effectMeta ? `Infused ${item.name}!` : `Designed ${item.name}!`,
+      effectMeta?.accentHex || '#ffd4e2'
+    );
   };
 
   // Buy High-Tier Piece from Luxury Wholesale Catalog
@@ -5862,7 +6372,7 @@ export default function App() {
 
       if (
         e.key === 'Escape' &&
-        (modalOpenRef.current || chatBarOpen || movingShopRef.current || selectedDecorKindRef.current)
+        (modalOpenRef.current || chatBarOpen || cameraModeOpen || movingShopRef.current || selectedDecorKindRef.current)
       ) {
         sfx.playClick();
         setWardrobeOpen(false);
@@ -5871,6 +6381,9 @@ export default function App() {
         setShopsModalOpen(false);
         setRunwayModalOpen(false);
         setBoatModalOpen(false);
+        setNewsstandOpen(false);
+        setLookbookOpen(false);
+        setCameraModeOpen(false);
         setManageShopId(null);
         setMovingShop(null);
         setSelectedDecorKind(null);
@@ -6372,7 +6885,14 @@ export default function App() {
       const boatCenterX = (BOAT_DOCK_COL + 2.5) * TILE_SIZE;
       const boatCenterY = (BOAT_DOCK_ROW + 0.5) * TILE_SIZE;
       const nearBoat = Math.hypot(p.x - boatCenterX, p.y - boatCenterY) <= TILE_SIZE * 3.8;
-      const nextPrompt: 'runway' | 'boat' | null = nearRunway ? 'runway' : nearBoat ? 'boat' : null;
+      const nearNewsstand = Math.hypot(p.x - NEWSSTAND_CENTER_X, p.y - NEWSSTAND_CENTER_Y) <= TILE_SIZE * 3.8;
+      const nextPrompt: 'runway' | 'boat' | 'newsstand' | null = nearRunway
+        ? 'runway'
+        : nearNewsstand
+          ? 'newsstand'
+          : nearBoat
+            ? 'boat'
+            : null;
       setNearLandmarkPrompt((prev) => (prev === nextPrompt ? prev : nextPrompt));
 
       const pColTile = p.x / TILE_SIZE;
@@ -6543,12 +7063,86 @@ export default function App() {
         }
       }
 
+      // 3c. Animated Outfit Pixel Particles (Starlight Coral trailing stars + Seafoam Essence bubbles)
+      const localEffectsNow = getItemsActiveEffects([
+        appearanceRef.current.hat,
+        appearanceRef.current.top,
+        appearanceRef.current.bottom,
+        appearanceRef.current.dress,
+        appearanceRef.current.shoes,
+      ]);
+      if (localEffectsNow.includes('starlight_coral') && p.isMoving && Math.random() < 0.36) {
+        particlesRef.current.push({
+          x: p.x + (Math.random() - 0.5) * 9,
+          y: p.y - 7 + (Math.random() - 0.5) * 8,
+          vx: -p.vx * 0.1 + (Math.random() - 0.5) * 16,
+          vy: -14 - Math.random() * 14,
+          life: 0.65,
+          maxLife: 0.65,
+          color: Math.random() < 0.55 ? '#fde047' : '#ff8fb1',
+          size: 1,
+          shape: 'star',
+          gravity: -10,
+        });
+      }
+      if (localEffectsNow.includes('seafoam_essence') && Math.random() < (p.isMoving ? 0.28 : 0.12)) {
+        particlesRef.current.push({
+          x: p.x + (Math.random() - 0.5) * 11,
+          y: p.y - 3 + (Math.random() - 0.5) * 7,
+          vx: (Math.random() - 0.5) * 10,
+          vy: -18 - Math.random() * 12,
+          life: 0.72,
+          maxLife: 0.72,
+          color: Math.random() < 0.55 ? '#5eead4' : '#b8f2fc',
+          size: 2,
+          shape: 'bubble',
+          gravity: -18,
+        });
+      }
+      for (const rp of remotePlayersRef.current.values()) {
+        const rpEffectsNow = getItemsActiveEffects([
+          rp.appearance.hat,
+          rp.appearance.top,
+          rp.appearance.bottom,
+          rp.appearance.dress,
+          rp.appearance.shoes,
+        ]);
+        if (rpEffectsNow.includes('starlight_coral') && rp.isMoving && Math.random() < 0.32) {
+          particlesRef.current.push({
+            x: rp.x + (Math.random() - 0.5) * 9,
+            y: rp.y - 7 + (Math.random() - 0.5) * 8,
+            vx: (Math.random() - 0.5) * 16,
+            vy: -14 - Math.random() * 12,
+            life: 0.6,
+            maxLife: 0.6,
+            color: Math.random() < 0.55 ? '#fde047' : '#ff8fb1',
+            size: 1,
+            shape: 'star',
+            gravity: -10,
+          });
+        }
+        if (rpEffectsNow.includes('seafoam_essence') && Math.random() < (rp.isMoving ? 0.25 : 0.1)) {
+          particlesRef.current.push({
+            x: rp.x + (Math.random() - 0.5) * 11,
+            y: rp.y - 3 + (Math.random() - 0.5) * 7,
+            vx: (Math.random() - 0.5) * 10,
+            vy: -18 - Math.random() * 12,
+            life: 0.68,
+            maxLife: 0.68,
+            color: Math.random() < 0.55 ? '#5eead4' : '#b8f2fc',
+            size: 2,
+            shape: 'bubble',
+            gravity: -18,
+          });
+        }
+      }
+
       // 4. Particles, Floating Text & Bobber
       particlesRef.current = particlesRef.current.filter((pt) => {
         pt.life -= dt;
         pt.x += pt.vx * dt;
         pt.y += pt.vy * dt;
-        pt.vy += 40 * dt;
+        pt.vy += (pt.gravity ?? 40) * dt;
         return pt.life > 0;
       });
       floatingTextsRef.current = floatingTextsRef.current.filter((ft) => {
@@ -6807,6 +7401,7 @@ export default function App() {
           const zoneLabels = [
             { text: "Lina's Boutique", x: (LINA_BOUTIQUE_COL + 2) * TILE_SIZE, y: (LINA_BOUTIQUE_ROW - 1) * TILE_SIZE - 2 },
             { text: "Sara's Boutique", x: (SARA_BOUTIQUE_COL + 2) * TILE_SIZE, y: (SARA_BOUTIQUE_ROW - 1) * TILE_SIZE - 2 },
+            { text: 'Island Newsstand', x: NEWSSTAND_CENTER_X, y: (NEWSSTAND_ROW - 0.6) * TILE_SIZE },
             { text: 'Runway & Auction Stage', x: RUNWAY_PODIUM_X, y: (RUNWAY_STAGE_ROW - 0.6) * TILE_SIZE },
             { text: 'Boat Fleet Dock', x: (BOAT_DOCK_COL + 2.5) * TILE_SIZE, y: (BOAT_DOCK_ROW - 0.8) * TILE_SIZE },
             { text: 'Deep-Sea Coral Reef (+2 Sea Res)', x: 136 * TILE_SIZE, y: 42 * TILE_SIZE },
@@ -7201,6 +7796,26 @@ export default function App() {
           renderables.sort((a, b) => a.y - b.y);
 
           const lanternPulse = 0.78 + 0.22 * Math.sin(globalTime * 4.2);
+          const sunsetPhase = Math.floor(globalTime * 7) % 12;
+          const nightAmount =
+            timeOfDayModeRef.current === 'night'
+              ? 1
+              : timeOfDayModeRef.current === 'day'
+                ? 0
+                : Math.max(0, Math.min(1, (-Math.cos(globalTime * 0.045) + 0.15) * 0.85));
+          const rainCycle = (globalTime % 110) / 110;
+          const autoRainAmount =
+            rainCycle > 0.72 && rainCycle < 0.94
+              ? Math.min(1, Math.sin(((rainCycle - 0.72) / 0.22) * Math.PI) * 1.4)
+              : 0;
+          const rainAmount =
+            weatherModeRef.current === 'rain'
+              ? 1
+              : weatherModeRef.current === 'sunny'
+                ? 0
+                : autoRainAmount;
+          const postNightGlowDraws: Array<() => void> = [];
+          const postNightLabelDraws: Array<() => void> = [];
 
           const drawSoftEllipticalShadow = (
             cx: number,
@@ -7235,7 +7850,16 @@ export default function App() {
           for (const item of renderables) {
             if (item.type === 'prop') {
               const pr = item.prop;
-              const spr = getPropSprite(pr, (swayFrame + pr.variant) % 4);
+              const isDeepDyeNode =
+                pr.kind === 'glowing_pearl_node' ||
+                pr.kind === 'starlight_coral_node' ||
+                pr.kind === 'seafoam_essence_node' ||
+                pr.kind === 'sunset_amber_node';
+              const nodeBobPx =
+                isDeepDyeNode && pr.respawnTimer <= 0
+                  ? Math.round(Math.sin(globalTime * 2.8 + pr.col) * 1.4)
+                  : 0;
+              const spr = getPropSprite(pr, (swayFrame + pr.variant) % 4, sunsetPhase);
               const sx =
                 pr.kind === 'boutique_backwall'
                   ? Math.round(pr.col * TILE_SIZE - camX) * PIXEL_SCALE
@@ -7247,16 +7871,56 @@ export default function App() {
                   ? Math.round((pr.row + 1) * TILE_SIZE - spr.height - camY) * PIXEL_SCALE
                   : pr.kind === 'boutique_pillar_l' || pr.kind === 'boutique_pillar_r'
                     ? Math.round((pr.row + 1) * TILE_SIZE - spr.height - camY) * PIXEL_SCALE
-                    : Math.round(pr.y - spr.height + 2 - camY) * PIXEL_SCALE;
+                    : Math.round(pr.y - spr.height + 2 + nodeBobPx - camY) * PIXEL_SCALE;
 
-              // Soft layered shadows for palm trees & mannequins
+              // Soft layered shadows for palm trees & mannequins, or subtle water ring under deep dye nodes
               if (pr.kind === 'palm' && pr.respawnTimer <= 0) {
                 drawSoftEllipticalShadow((pr.x - camX) * PIXEL_SCALE, (pr.y - camY) * PIXEL_SCALE, 10 * PIXEL_SCALE, 3.6 * PIXEL_SCALE, 0.24);
               } else if (pr.kind === 'mannequin') {
                 drawSoftEllipticalShadow((pr.x - camX) * PIXEL_SCALE, (pr.y - camY) * PIXEL_SCALE + PIXEL_SCALE, 5.5 * PIXEL_SCALE, 2.1 * PIXEL_SCALE, 0.24);
+              } else if (isDeepDyeNode && pr.respawnTimer <= 0) {
+                const ringPulse = 0.72 + 0.28 * Math.sin(globalTime * 3.4 + pr.row);
+                const ringCol =
+                  pr.kind === 'glowing_pearl_node'
+                    ? `rgba(103, 232, 249, ${(0.35 * ringPulse).toFixed(2)})`
+                    : pr.kind === 'starlight_coral_node'
+                      ? `rgba(253, 224, 71, ${(0.32 * ringPulse).toFixed(2)})`
+                      : pr.kind === 'seafoam_essence_node'
+                        ? `rgba(94, 234, 212, ${(0.34 * ringPulse).toFixed(2)})`
+                        : `rgba(251, 146, 60, ${(0.34 * ringPulse).toFixed(2)})`;
+                ctx.fillStyle = ringCol;
+                ctx.fillRect(
+                  Math.round(pr.x - 6 - camX) * PIXEL_SCALE,
+                  Math.round(pr.y - 1 - camY) * PIXEL_SCALE,
+                  12 * PIXEL_SCALE,
+                  3 * PIXEL_SCALE
+                );
               }
 
               ctx.drawImage(spr, sx, sy, spr.width * PIXEL_SCALE, spr.height * PIXEL_SCALE);
+
+              if (isDeepDyeNode && pr.respawnTimer <= 0) {
+                const nodeCx = sx + (spr.width / 2) * PIXEL_SCALE;
+                const nodeCy = sy + (spr.height / 2) * PIXEL_SCALE;
+                const nodeGlowRgb =
+                  pr.kind === 'glowing_pearl_node'
+                    ? '103, 232, 249'
+                    : pr.kind === 'starlight_coral_node'
+                      ? '253, 224, 71'
+                      : pr.kind === 'seafoam_essence_node'
+                        ? '94, 234, 212'
+                        : '251, 146, 60';
+                postNightGlowDraws.push(() => {
+                  const rad = 11 * PIXEL_SCALE;
+                  const g = ctx.createRadialGradient(nodeCx, nodeCy, 1, nodeCx, nodeCy, rad);
+                  g.addColorStop(0, `rgba(${nodeGlowRgb}, ${(0.28 + 0.16 * nightAmount).toFixed(3)})`);
+                  g.addColorStop(1, `rgba(${nodeGlowRgb}, 0)`);
+                  ctx.fillStyle = g;
+                  ctx.beginPath();
+                  ctx.arc(nodeCx, nodeCy, rad, 0, Math.PI * 2);
+                  ctx.fill();
+                });
+              }
 
               // Warm layered radial golden glow halos on boutique back walls, side pillars & lantern posts
               if (pr.kind === 'boutique_backwall') {
@@ -7275,37 +7939,100 @@ export default function App() {
                           bwWallW - 5,
                         ]
                       : [1, bwWallW - 5];
-                for (const lx of lanternXs) {
-                  drawWarmLanternGlow(
-                    sx + (lx + 2) * PIXEL_SCALE,
-                    sy + haloYOffset * PIXEL_SCALE,
-                    (bwTier >= 3 ? 15 : 13) * PIXEL_SCALE
-                  );
-                }
+                postNightGlowDraws.push(() => {
+                  for (const lx of lanternXs) {
+                    drawWarmLanternGlow(
+                      sx + (lx + 2) * PIXEL_SCALE,
+                      sy + haloYOffset * PIXEL_SCALE,
+                      (bwTier >= 3 ? 15 : 13) * PIXEL_SCALE
+                    );
+                  }
+                });
               } else if (pr.kind === 'boutique_pillar_l' || pr.kind === 'boutique_pillar_r') {
                 const lxOffset = pr.kind === 'boutique_pillar_l' ? 6 : 9;
-                drawWarmLanternGlow(sx + lxOffset * PIXEL_SCALE, sy + 12.5 * PIXEL_SCALE, 11 * PIXEL_SCALE);
+                postNightGlowDraws.push(() => {
+                  drawWarmLanternGlow(sx + lxOffset * PIXEL_SCALE, sy + 12.5 * PIXEL_SCALE, 11 * PIXEL_SCALE);
+                });
               } else if (pr.kind === 'lantern_post') {
-                drawWarmLanternGlow(sx + (spr.width / 2) * PIXEL_SCALE, sy + 6 * PIXEL_SCALE, 17 * PIXEL_SCALE);
+                postNightGlowDraws.push(() => {
+                  drawWarmLanternGlow(sx + (spr.width / 2) * PIXEL_SCALE, sy + 6 * PIXEL_SCALE, 17 * PIXEL_SCALE);
+                });
+              } else if (pr.kind === 'newsstand_kiosk') {
+                postNightGlowDraws.push(() => {
+                  drawWarmLanternGlow(sx + 43 * PIXEL_SCALE, sy + 15 * PIXEL_SCALE, 15 * PIXEL_SCALE);
+                });
+              }
+
+              // Mannequin animated pixel effects + Weather/Night Reactive Secondary States
+              if (pr.kind === 'mannequin' && pr.listing?.item) {
+                const mItem = pr.listing.item;
+                if (mItem.effect === 'glowing_pearls') {
+                  postNightGlowDraws.push(() => {
+                    drawGlowingPearlsMannequinOverlay(
+                      ctx,
+                      mItem,
+                      sx,
+                      sy,
+                      PIXEL_SCALE,
+                      globalTime,
+                      nightAmount
+                    );
+                  });
+                } else if (mItem.effect === 'starlight_coral' || mItem.effect === 'seafoam_essence') {
+                  const mEff = mItem.effect;
+                  postNightGlowDraws.push(() => {
+                    drawOutfitAmbientEffects(
+                      ctx,
+                      [mEff],
+                      sx + (spr.width / 2) * PIXEL_SCALE,
+                      sy + (spr.height / 2) * PIXEL_SCALE,
+                      PIXEL_SCALE,
+                      globalTime,
+                      'mannequin'
+                    );
+                  });
+                }
+                if (mItem.reactive?.nightNeon && nightAmount > 0.05) {
+                  postNightGlowDraws.push(() => {
+                    drawNightNeonMannequinOverlay(
+                      ctx,
+                      mItem,
+                      sx,
+                      sy,
+                      PIXEL_SCALE,
+                      globalTime,
+                      nightAmount
+                    );
+                  });
+                }
+                if (mItem.reactive?.rainMode && rainAmount > 0.15) {
+                  drawRainReactiveMannequinOverlay(
+                    ctx,
+                    mItem,
+                    sx,
+                    sy,
+                    PIXEL_SCALE,
+                    rainAmount
+                  );
+                }
               }
 
               // Crisp Price Tag underneath Listed Mannequins (+ 2x Trend Highlight!)
               if (pr.kind === 'mannequin' && pr.listing) {
                 const centerScreenX = (pr.x - camX) * PIXEL_SCALE;
                 const tagBottomY = sy + spr.height * PIXEL_SCALE + 13;
-                drawPriceTag(
-                  ctx,
-                  pr.listing.price,
-                  centerScreenX,
-                  tagBottomY,
-                  pr.ownerId ? pr.ownerId !== playerId : pr.owner === 'Sara' || pr.owner === 'Lina'
-                );
-                if (doesItemMatchTrend(pr.listing.item, activeTrendFrame)) {
-                  ctx.font = 'bold 9px "Silkscreen", monospace';
-                  ctx.fillStyle = '#fef08a';
-                  ctx.textAlign = 'center';
-                  ctx.fillText('2x★', centerScreenX, tagBottomY - 19);
-                }
+                const priceVal = pr.listing.price;
+                const isRivalOwner = pr.ownerId ? pr.ownerId !== playerId : pr.owner === 'Sara' || pr.owner === 'Lina';
+                const trendMatch = doesItemMatchTrend(pr.listing.item, activeTrendFrame);
+                postNightLabelDraws.push(() => {
+                  drawPriceTag(ctx, priceVal, centerScreenX, tagBottomY, isRivalOwner);
+                  if (trendMatch) {
+                    ctx.font = 'bold 9px "Silkscreen", monospace';
+                    ctx.fillStyle = '#fef08a';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('2x★', centerScreenX, tagBottomY - 19);
+                  }
+                });
               }
 
               if (pr.respawnTimer > 0 && pr.solid) {
@@ -7342,13 +8069,29 @@ export default function App() {
               ctx.drawImage(petSpr, px, py, petSpr.width * PIXEL_SCALE, petSpr.height * PIXEL_SCALE);
               if (item.heartUntil && item.heartUntil > nowWall) {
                 const bobHeart = Math.sin(globalTime * 7) * 2;
-                drawFloatingEmoji(ctx, '❤️', (item.x - camX) * PIXEL_SCALE, py + 2, bobHeart);
+                const heartX = (item.x - camX) * PIXEL_SCALE;
+                postNightLabelDraws.push(() => {
+                  drawFloatingEmoji(ctx, '❤️', heartX, py + 2, bobHeart);
+                });
               }
             } else {
               const ch = item.char;
               const walkCycle = [0, 1, 2, 3];
               const frame = ch.isBoating ? 0 : ch.isMoving ? walkCycle[Math.floor(ch.animTime) % 4] : 0;
-              const spr = renderCharacterSprite(ch.appearance, ch.dir, frame);
+              const chPieces = [
+                ch.appearance.hat,
+                ch.appearance.top,
+                ch.appearance.bottom,
+                ch.appearance.dress,
+                ch.appearance.shoes,
+              ];
+              const chEffects = getItemsActiveEffects(chPieces);
+              const spr = renderCharacterSprite(
+                ch.appearance,
+                ch.dir,
+                frame,
+                chEffects.includes('sunset_amber') ? sunsetPhase : 0
+              );
 
               const drawX = Math.round(ch.x - 8 - camX) * PIXEL_SCALE;
               const drawY = Math.round(ch.y - (ch.isBoating ? 24 : 22) - camY) * PIXEL_SCALE;
@@ -7376,13 +8119,10 @@ export default function App() {
                   ctx.drawImage(petSpr, bpx, bpy, petSpr.width * PIXEL_SCALE, petSpr.height * PIXEL_SCALE);
                   if (bPet.heartUntil && bPet.heartUntil > nowWall) {
                     const bobHeart = Math.sin(globalTime * 7) * 2;
-                    drawFloatingEmoji(
-                      ctx,
-                      '❤️',
-                      (ch.x + seatOffX - camX) * PIXEL_SCALE,
-                      bpy + 2,
-                      bobHeart
-                    );
+                    const heartX = (ch.x + seatOffX - camX) * PIXEL_SCALE;
+                    postNightLabelDraws.push(() => {
+                      drawFloatingEmoji(ctx, '❤️', heartX, bpy + 2, bobHeart);
+                    });
                   }
                 }
                 ctx.drawImage(spr, drawX, drawY, 16 * PIXEL_SCALE, 24 * PIXEL_SCALE);
@@ -7396,6 +8136,71 @@ export default function App() {
                   0.26
                 );
                 ctx.drawImage(spr, drawX, drawY, 16 * PIXEL_SCALE, 24 * PIXEL_SCALE);
+              }
+
+              if (chEffects.includes('glowing_pearls')) {
+                const chDir = ch.dir;
+                postNightGlowDraws.push(() => {
+                  drawGlowingPearlsSpriteOverlay(
+                    ctx,
+                    chPieces,
+                    chDir,
+                    frame,
+                    drawX,
+                    drawY,
+                    PIXEL_SCALE,
+                    globalTime,
+                    nightAmount
+                  );
+                });
+              }
+              // Secondary State: Night Mode Bioluminescent Neon Overlay (local + remote players)
+              if (hasNightNeonItems(chPieces) && nightAmount > 0.05) {
+                const chDir = ch.dir;
+                postNightGlowDraws.push(() => {
+                  drawNightNeonSpriteOverlay(
+                    ctx,
+                    chPieces,
+                    chDir,
+                    frame,
+                    drawX,
+                    drawY,
+                    PIXEL_SCALE,
+                    globalTime,
+                    nightAmount
+                  );
+                });
+              }
+              // Secondary State: Rain Mode Matching Pixel Umbrella or Rain Hood (local + remote players)
+              if (rainAmount > 0.15 && getActiveRainConfig(chPieces)) {
+                drawRainReactiveOverlay(
+                  ctx,
+                  chPieces,
+                  ch.dir,
+                  frame,
+                  drawX,
+                  drawY,
+                  PIXEL_SCALE,
+                  rainAmount
+                );
+              }
+              const ambientCharEffs = chEffects.filter(
+                (ef) => ef === 'seafoam_essence' || (ef === 'starlight_coral' && !ch.isMoving)
+              );
+              if (ambientCharEffs.length > 0) {
+                const charCx = (ch.x - camX) * PIXEL_SCALE;
+                const charCy = drawY + 13 * PIXEL_SCALE;
+                postNightGlowDraws.push(() => {
+                  drawOutfitAmbientEffects(
+                    ctx,
+                    ambientCharEffs,
+                    charCx,
+                    charCy,
+                    PIXEL_SCALE,
+                    globalTime,
+                    'player'
+                  );
+                });
               }
 
               if (ch.swingTimer && ch.swingTimer > 0) {
@@ -7414,27 +8219,101 @@ export default function App() {
 
               const centerScreenX = (ch.x - camX) * PIXEL_SCALE;
               const topScreenY = drawY - 4;
-              drawNameTag(ctx, ch.name, centerScreenX, topScreenY, ch.isPlayer);
-
-              let bubbleAnchorY = topScreenY - 22;
-              if (ch.chatText) {
-                drawSpeechBubble(ctx, ch.chatText, centerScreenX, bubbleAnchorY);
-                bubbleAnchorY -= 38;
-              }
-              if (ch.emoteEmoji) {
-                const bob = Math.sin(globalTime * 6) * 2.5;
-                drawFloatingEmoji(ctx, ch.emoteEmoji, centerScreenX, bubbleAnchorY, bob);
-              } else if (ch.emote && ch.emoteTimer && ch.emoteTimer > 0) {
-                drawEmote(ctx, ch.emote, centerScreenX, topScreenY - 18);
-              }
+              const charName = ch.name;
+              const isCharPlayer = ch.isPlayer;
+              const charChatText = ch.chatText;
+              const charEmoteEmoji = ch.emoteEmoji;
+              const charEmote = ch.emote;
+              const charEmoteTimer = ch.emoteTimer;
+              postNightLabelDraws.push(() => {
+                drawNameTag(ctx, charName, centerScreenX, topScreenY, isCharPlayer);
+                let bubbleAnchorY = topScreenY - 22;
+                if (charChatText) {
+                  drawSpeechBubble(ctx, charChatText, centerScreenX, bubbleAnchorY);
+                  bubbleAnchorY -= 38;
+                }
+                if (charEmoteEmoji) {
+                  const bob = Math.sin(globalTime * 6) * 2.5;
+                  drawFloatingEmoji(ctx, charEmoteEmoji, centerScreenX, bubbleAnchorY, bob);
+                } else if (charEmote && charEmoteTimer && charEmoteTimer > 0) {
+                  drawEmote(ctx, charEmote, centerScreenX, topScreenY - 18);
+                }
+              });
             }
+          }
+
+          if (rainAmount > 0.03) {
+            ctx.fillStyle = `rgba(38, 66, 98, ${(rainAmount * 0.22).toFixed(3)})`;
+            ctx.fillRect(0, 0, viewCssW, viewCssH);
+          }
+
+          if (nightAmount > 0.02) {
+            ctx.fillStyle = `rgba(10, 20, 52, ${(nightAmount * 0.44).toFixed(3)})`;
+            ctx.fillRect(0, 0, viewCssW, viewCssH);
+          }
+
+          for (const drawGlow of postNightGlowDraws) {
+            drawGlow();
+          }
+
+          // Cozy Diagonal Tropical Pixel Rain Streaks & Splash Ripples
+          if (rainAmount > 0.05) {
+            const dropCount = Math.round(68 * rainAmount);
+            ctx.save();
+            ctx.strokeStyle = `rgba(210, 236, 255, ${(0.42 * rainAmount).toFixed(3)})`;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            for (let i = 0; i < dropCount; i++) {
+              const seed = i * 97.3;
+              const rx = ((seed * 13.7 - globalTime * 115) % (viewCssW + 80) + (viewCssW + 80)) % (viewCssW + 80) - 40;
+              const ry = ((seed * 19.1 + globalTime * 420) % (viewCssH + 60)) - 30;
+              ctx.moveTo(rx, ry);
+              ctx.lineTo(rx - 4, ry + 13);
+            }
+            ctx.stroke();
+
+            // Subtle puddle splash rings
+            ctx.fillStyle = `rgba(224, 242, 254, ${(0.34 * rainAmount).toFixed(3)})`;
+            const splashCount = Math.round(14 * rainAmount);
+            for (let i = 0; i < splashCount; i++) {
+              const phase = (globalTime * 2.4 + i * 0.37) % 1;
+              if (phase > 0.45) continue;
+              const sxp = (((i * 193 + Math.floor(globalTime * 1.3 + i) * 71) % viewCssW) + viewCssW) % viewCssW;
+              const syp = (((i * 149 + Math.floor(globalTime * 1.1 + i) * 53) % viewCssH) + viewCssH) % viewCssH;
+              const rPx = 2 + Math.floor(phase * 10);
+              ctx.fillRect(sxp - rPx, syp, rPx * 2, 1.5);
+            }
+            ctx.restore();
+          }
+
+          for (const drawLbl of postNightLabelDraws) {
+            drawLbl();
           }
 
           for (const pt of particlesRef.current) {
             const px = Math.round(pt.x - camX) * PIXEL_SCALE;
             const py = Math.round(pt.y - camY) * PIXEL_SCALE;
-            ctx.fillStyle = pt.color;
-            ctx.fillRect(px, py, pt.size * PIXEL_SCALE, pt.size * PIXEL_SCALE);
+            const alpha = Math.max(0.15, Math.min(1, pt.life / pt.maxLife));
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            if (pt.shape === 'star') {
+              const s = Math.max(2, pt.size * PIXEL_SCALE);
+              ctx.fillStyle = pt.color;
+              ctx.fillRect(px - s, py, s * 3, s);
+              ctx.fillRect(px, py - s, s, s * 3);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(px, py, s, s);
+            } else if (pt.shape === 'bubble') {
+              const s = Math.max(3, pt.size * PIXEL_SCALE);
+              ctx.fillStyle = pt.color;
+              ctx.fillRect(px, py, s, s);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(px, py, Math.max(1, Math.floor(s * 0.45)), Math.max(1, Math.floor(s * 0.45)));
+            } else {
+              ctx.fillStyle = pt.color;
+              ctx.fillRect(px, py, pt.size * PIXEL_SCALE, pt.size * PIXEL_SCALE);
+            }
+            ctx.restore();
           }
 
           ctx.font = 'bold 12px "Silkscreen", monospace';
@@ -7511,6 +8390,22 @@ export default function App() {
               } else if (pr.kind === 'mannequin' && pr.listing) {
                 mctx.fillStyle = '#ffe566';
                 mctx.fillRect(pr.col, pr.row, 1, 1);
+              } else if (
+                (pr.kind === 'glowing_pearl_node' ||
+                  pr.kind === 'starlight_coral_node' ||
+                  pr.kind === 'seafoam_essence_node' ||
+                  pr.kind === 'sunset_amber_node') &&
+                pr.respawnTimer <= 0
+              ) {
+                mctx.fillStyle =
+                  pr.kind === 'glowing_pearl_node'
+                    ? '#67e8f9'
+                    : pr.kind === 'starlight_coral_node'
+                      ? '#fde047'
+                      : pr.kind === 'seafoam_essence_node'
+                        ? '#5eead4'
+                        : '#fb923c';
+                mctx.fillRect(pr.col, pr.row, 2, 2);
               }
             }
 
@@ -7711,6 +8606,142 @@ export default function App() {
     setJoystickThumb({ x: 0, y: 0, active: false });
   }, []);
 
+  const getCurrentZoneName = useCallback((): string => {
+    const p = playerRef.current;
+    if (p.x >= REEF_BOUNDARY_X) return 'Deep-Sea Coral Reef';
+    if (Math.hypot(p.x - RUNWAY_PODIUM_X, p.y - RUNWAY_PODIUM_Y) <= TILE_SIZE * 7) return 'Runway & Auction Stage';
+    if (Math.hypot(p.x - NEWSSTAND_CENTER_X, p.y - NEWSSTAND_CENTER_Y) <= TILE_SIZE * 6) return 'Island Newsstand Plaza';
+    if (Math.hypot(p.x - (BOAT_DOCK_COL + 2) * TILE_SIZE, p.y - BOAT_DOCK_ROW * TILE_SIZE) <= TILE_SIZE * 6) return 'Coral Boat Dock';
+    if (Math.hypot(p.x - (LINA_BOUTIQUE_COL + 2) * TILE_SIZE, p.y - LINA_BOUTIQUE_ROW * TILE_SIZE) <= TILE_SIZE * 7) return "Lina's Mariner Boutique";
+    if (Math.hypot(p.x - (SARA_BOUTIQUE_COL + 2) * TILE_SIZE, p.y - SARA_BOUTIQUE_ROW * TILE_SIZE) <= TILE_SIZE * 7) return "Sara's Sunlit Boutique";
+    if (isBoatingRef.current) return 'Coral Cove Open Sea';
+    return 'Coral Cove Island';
+  }, []);
+
+  const persistSnapshots = useCallback((next: LookbookSnapshot[]) => {
+    setSnapshots(next);
+    try {
+      localStorage.setItem(SNAPSHOTS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, []);
+
+  const handleCaptureSnapshot = useCallback(() => {
+    const srcCanvas = mainCanvasRef.current;
+    if (!srcCanvas) return;
+    const outW = 280;
+    const outH = 196;
+    const off = document.createElement('canvas');
+    off.width = outW;
+    off.height = outH;
+    const octx = off.getContext('2d');
+    if (!octx) return;
+
+    // Crop centered 10:7 viewfinder region around the player & nearby friends
+    const srcW = srcCanvas.width;
+    const srcH = srcCanvas.height;
+    const targetAspect = outW / outH;
+    const srcAspect = srcW / Math.max(1, srcH);
+    let cropW = srcW * 0.72;
+    let cropH = cropW / targetAspect;
+    if (cropH > srcH * 0.8) {
+      cropH = srcH * 0.8;
+      cropW = cropH * targetAspect;
+    }
+    if (srcAspect < 1) {
+      cropW = srcW * 0.88;
+      cropH = Math.min(srcH * 0.82, cropW / targetAspect);
+    }
+    const sx = Math.max(0, (srcW - cropW) / 2);
+    const sy = Math.max(0, (srcH - cropH) / 2);
+    octx.imageSmoothingEnabled = false;
+    octx.drawImage(srcCanvas, sx, sy, cropW, cropH, 0, 0, outW, outH);
+
+    const dataUrl = off.toDataURL('image/jpeg', 0.74);
+    const p = playerRef.current;
+    let friendsCount = 0;
+    for (const rp of remotePlayersRef.current.values()) {
+      if (Math.hypot(rp.x - p.x, rp.y - p.y) <= TILE_SIZE * 10) friendsCount++;
+    }
+    const snap: LookbookSnapshot = {
+      id: `snap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
+      dataUrl,
+      takenAt: Date.now(),
+      location: getCurrentZoneName(),
+      friendsCount,
+    };
+
+    sfx.playChime();
+    setCameraFlash(true);
+    setTimeout(() => setCameraFlash(false), 220);
+    persistSnapshots([snap, ...snapshots].slice(0, 18));
+    spawnFloatingText(p.x, p.y - 24, '📸 Snapshot Saved!', '#fef08a');
+  }, [getCurrentZoneName, persistSnapshots, snapshots, spawnFloatingText]);
+
+  const handleDeleteSnapshot = useCallback(
+    (snapId: string) => {
+      persistSnapshots(snapshots.filter((s) => s.id !== snapId));
+    },
+    [persistSnapshots, snapshots]
+  );
+
+  const handlePublishMagazine = useCallback(
+    async (payload: {
+      title: string;
+      subtitle: string;
+      theme: MagazineTheme;
+      price: number;
+      pages: MagazinePage[];
+    }) => {
+      const res = await publishMagazine({
+        ...payload,
+        authorId: playerId,
+        authorName: playerName.trim() || 'Islander',
+      });
+      setOwnedMagazineIds((prev) =>
+        prev.includes(res.magazine.id) ? prev : [...prev, res.magazine.id]
+      );
+      sfx.playCoin();
+      spawnParticles(playerRef.current.x, playerRef.current.y - 12, '#f43f5e', 14);
+      spawnFloatingText(
+        playerRef.current.x,
+        playerRef.current.y - 26,
+        `Published "${res.magazine.title}"!`,
+        '#fde047'
+      );
+      setLookbookOpen(false);
+      setNewsstandOpen(true);
+    },
+    [playerId, playerName, spawnFloatingText, spawnParticles]
+  );
+
+  const handleBuyMagazine = useCallback(
+    async (mag: CloudMagazine): Promise<boolean> => {
+      const res = await purchaseMagazine({
+        magazine: mag,
+        buyerId: playerId,
+        buyerName: playerName.trim() || 'Islander',
+      });
+      setGold(res.newBuyerGold);
+      setOwnedMagazineIds((prev) => (prev.includes(mag.id) ? prev : [...prev, mag.id]));
+      sfx.playCoin();
+      spawnParticles(playerRef.current.x, playerRef.current.y - 10, '#fde047', 12);
+      spawnFloatingText(
+        playerRef.current.x,
+        playerRef.current.y - 24,
+        `Bought "${mag.title}"!`,
+        '#fef08a'
+      );
+      return true;
+    },
+    [playerId, playerName, spawnFloatingText, spawnParticles]
+  );
+
+  const handleLikeMagazine = useCallback((mag: CloudMagazine) => {
+    void likeMagazine(mag);
+  }, []);
+
   const anyModalBlockingHud =
     !joinedIsland ||
     wardrobeOpen ||
@@ -7719,6 +8750,8 @@ export default function App() {
     shopsModalOpen ||
     runwayModalOpen ||
     boatModalOpen ||
+    newsstandOpen ||
+    lookbookOpen ||
     manageShopId !== null ||
     activeStallPropId !== null ||
     buyPreviewPropId !== null;
@@ -7906,6 +8939,46 @@ export default function App() {
             type="button"
             onClick={() => {
               sfx.playClick();
+              setTimeOfDayMode((m) => (m === 'auto' ? 'night' : m === 'night' ? 'day' : 'auto'));
+            }}
+            title={`Time of Day: ${timeOfDayMode === 'auto' ? 'Auto Cycle' : timeOfDayMode === 'night' ? 'Night (Glow)' : 'Daylight'}`}
+            aria-label="Toggle Day/Night Lighting"
+            className={`wood-btn flex cursor-pointer items-center gap-1 px-2 py-0.5 text-[11px] font-bold focus-visible:outline-2 focus-visible:outline-amber-300 ${
+              timeOfDayMode === 'night' ? 'ring-2 ring-[#67e8f9]' : ''
+            }`}
+          >
+            {timeOfDayMode === 'night' ? (
+              <Moon className="h-3.5 w-3.5 text-[#1e3a8a]" />
+            ) : (
+              <Sun className="h-3.5 w-3.5 text-[#b45309]" />
+            )}
+            <span className="hidden sm:inline">
+              {timeOfDayMode === 'auto' ? 'Auto' : timeOfDayMode === 'night' ? 'Night' : 'Day'}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              sfx.playClick();
+              setWeatherMode((w) => (w === 'auto' ? 'rain' : w === 'rain' ? 'sunny' : 'auto'));
+            }}
+            title={`Island Weather: ${weatherMode === 'auto' ? 'Auto Showers' : weatherMode === 'rain' ? 'Tropical Rain (triggers Rain Outfits)' : 'Clear Sky'}`}
+            aria-label="Toggle Island Weather"
+            className={`wood-btn flex cursor-pointer items-center gap-1 px-2 py-0.5 text-[11px] font-bold focus-visible:outline-2 focus-visible:outline-amber-300 ${
+              weatherMode === 'rain' ? 'ring-2 ring-[#38bdf8]' : ''
+            }`}
+          >
+            <CloudRain
+              className={`h-3.5 w-3.5 ${weatherMode === 'rain' ? 'text-[#0284c7]' : 'text-[#5c361a]'}`}
+            />
+            <span className="hidden sm:inline">
+              {weatherMode === 'auto' ? 'Sky' : weatherMode === 'rain' ? 'Rain' : 'Clear'}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              sfx.playClick();
               setShowTouchControls((v) => !v);
             }}
             title={showTouchControls ? 'Hide On-Screen Joystick' : 'Show On-Screen Joystick'}
@@ -8051,6 +9124,7 @@ export default function App() {
               onClick={() => {
                 sfx.playClick();
                 if (nearLandmarkPrompt === 'runway') setRunwayModalOpen(true);
+                else if (nearLandmarkPrompt === 'newsstand') setNewsstandOpen(true);
                 else setBoatModalOpen(true);
               }}
               className="wood-panel flex cursor-pointer items-center gap-1.5 px-2.5 py-1 text-[11px] font-bold text-[#3d1e0b] hover:brightness-105"
@@ -8059,6 +9133,11 @@ export default function App() {
                 <>
                   <Gavel className="h-3.5 w-3.5 text-[#b91c1c]" />
                   <span>Press E: Runway &amp; Live Auction</span>
+                </>
+              ) : nearLandmarkPrompt === 'newsstand' ? (
+                <>
+                  <Newspaper className="h-3.5 w-3.5 text-[#be123c]" />
+                  <span>Press E: Island Newsstand (Magazines)</span>
                 </>
               ) : (
                 <>
@@ -8170,11 +9249,53 @@ export default function App() {
             type="button"
             onClick={() => {
               sfx.playClick();
+              setCameraModeOpen((c) => !c);
+            }}
+            title="Island Fashion Camera (Take Lookbook Snapshots)"
+            className={`flex h-8 cursor-pointer items-center gap-1 border-2 border-[#45230d] px-2 text-xs font-bold shadow-[0_2px_0_#4c0519] hover:brightness-105 ${
+              cameraModeOpen ? 'bg-[#e11d48] text-white' : 'bg-[#ffe4e6] text-[#881337]'
+            }`}
+          >
+            <Camera className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Snap</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              sfx.playClick();
+              setCameraModeOpen(false);
+              setWardrobeOpen(false);
+              setCraftingOpen(false);
+              setDesignStudioOpen(false);
+              setShopsModalOpen(false);
+              setRunwayModalOpen(false);
+              setBoatModalOpen(false);
+              setLookbookOpen(false);
+              setManageShopId(null);
+              setActiveStallPropId(null);
+              setBuyPreviewPropId(null);
+              setNewsstandOpen(true);
+            }}
+            title="Island Newsstand — Browse, Buy & Publish Fashion Magazines"
+            className="flex h-8 cursor-pointer items-center gap-1 border-2 border-[#45230d] bg-[#fef3c7] px-2 text-xs font-bold text-[#78350f] shadow-[0_2px_0_#92400e] hover:brightness-105"
+          >
+            <Newspaper className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Mags</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              sfx.playClick();
+              setCameraModeOpen(false);
               setWardrobeOpen(false);
               setCraftingOpen(false);
               setShopsModalOpen(false);
               setRunwayModalOpen(false);
               setBoatModalOpen(false);
+              setNewsstandOpen(false);
+              setLookbookOpen(false);
               setManageShopId(null);
               setActiveStallPropId(null);
               setBuyPreviewPropId(null);
@@ -8233,8 +9354,15 @@ export default function App() {
         <DesignStudioModal
           playerName={playerName}
           fabricCount={inventory.fabric}
+          rareIngredients={{
+            glowing_pearls: inventory.glowing_pearls,
+            starlight_coral: inventory.starlight_coral,
+            seafoam_essence: inventory.seafoam_essence,
+            sunset_amber: inventory.sunset_amber,
+          }}
           baseAppearance={appearance}
           ownedCount={ownedItems.length}
+          renderIngredientIcon={(kind, sz) => <PixelItemIcon kind={kind} size={sz ?? 18} />}
           renderCharacterPreview={renderCharacterSprite}
           onPlayClick={() => sfx.playClick()}
           onCreateItem={handleCraftDesignItem}
@@ -8312,6 +9440,18 @@ export default function App() {
                           by {stallSelectedItem.creatorName}
                           {formatEditionBadge(stallSelectedItem) ? ` · ${formatEditionBadge(stallSelectedItem)}` : ''}
                         </div>
+                        {getOutfitEffectMeta(stallSelectedItem.effect) && (
+                          <div
+                            className="inline-block border px-1.5 py-0.5 text-[10px] font-bold"
+                            style={{
+                              backgroundColor: getOutfitEffectMeta(stallSelectedItem.effect)!.badgeBg,
+                              color: getOutfitEffectMeta(stallSelectedItem.effect)!.badgeText,
+                              borderColor: getOutfitEffectMeta(stallSelectedItem.effect)!.badgeBorder,
+                            }}
+                          >
+                            ✦ {getOutfitEffectMeta(stallSelectedItem.effect)!.label}
+                          </div>
+                        )}
                         {doesItemMatchTrend(stallSelectedItem, activeTrend) && (
                           <div className="inline-block border border-[#15803d] bg-[#dcfce7] px-1.5 py-0.5 text-[10px] font-bold text-[#15803d]">
                             2× Trend Bonus Active!
@@ -8583,6 +9723,18 @@ export default function App() {
                                 {formatEditionBadge(item)}
                               </span>
                             )}
+                            {getOutfitEffectMeta(item.effect) && (
+                              <span
+                                className="border px-1.5 py-0.5"
+                                style={{
+                                  backgroundColor: getOutfitEffectMeta(item.effect)!.badgeBg,
+                                  color: getOutfitEffectMeta(item.effect)!.badgeText,
+                                  borderColor: getOutfitEffectMeta(item.effect)!.badgeBorder,
+                                }}
+                              >
+                                ✦ {getOutfitEffectMeta(item.effect)!.label}
+                              </span>
+                            )}
                             {doesItemMatchTrend(item, activeTrend) && (
                               <span className="border border-[#15803d] bg-[#dcfce7] px-1.5 py-0.5 text-[#15803d]">
                                 2× Trend
@@ -8689,7 +9841,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="mb-4 grid grid-cols-3 gap-2 rounded-sm border-2 border-[#c79963] bg-[#ebd2a4] p-2.5 sm:grid-cols-6">
+            <div className="mb-4 grid grid-cols-2 gap-2 rounded-sm border-2 border-[#c79963] bg-[#ebd2a4] p-2.5 sm:grid-cols-5">
               {(
                 [
                   { kind: 'wood', label: 'Wood' },
@@ -8698,6 +9850,10 @@ export default function App() {
                   { kind: 'dyes', label: 'Dyes' },
                   { kind: 'golden_pearls', label: 'Gold Pearl' },
                   { kind: 'royal_silk', label: 'Royal Silk' },
+                  { kind: 'glowing_pearls', label: 'Glow Pearl' },
+                  { kind: 'starlight_coral', label: 'Star Coral' },
+                  { kind: 'seafoam_essence', label: 'Seafoam' },
+                  { kind: 'sunset_amber', label: 'Sun Amber' },
                 ] as const
               ).map((mat) => (
                 <div key={mat.kind} className="flex items-center gap-1.5 px-1">
@@ -9321,6 +10477,17 @@ export default function App() {
                       <span>Royal Silk: {inventory.royal_silk}</span>
                     </div>
                   )}
+                  {(inventory.glowing_pearls > 0 ||
+                    inventory.starlight_coral > 0 ||
+                    inventory.seafoam_essence > 0 ||
+                    inventory.sunset_amber > 0) && (
+                    <div className="grid grid-cols-2 gap-1 border border-[#0e7490] bg-[#ecfeff] px-1.5 py-1 text-[10px] font-bold tabular-nums text-[#155e75]">
+                      <span>Glow Pearl: {inventory.glowing_pearls}</span>
+                      <span>Star Coral: {inventory.starlight_coral}</span>
+                      <span>Seafoam: {inventory.seafoam_essence}</span>
+                      <span>Sun Amber: {inventory.sunset_amber}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Currently Equipped Slots Summary */}
@@ -9478,7 +10645,7 @@ export default function App() {
                                       <ClothingThumb item={item} size={30} />
                                     </div>
                                     <div className="min-w-0">
-                                      <div className="flex items-center gap-1">
+                                      <div className="flex flex-wrap items-center gap-1">
                                         <span dir="auto" className="truncate text-xs font-bold text-[#3d1e0b]">
                                           {item.name}
                                         </span>
@@ -9487,6 +10654,31 @@ export default function App() {
                                             {badge}
                                           </span>
                                         )}
+                                        {getOutfitEffectMeta(item.effect) && (
+                                          <span
+                                            className="shrink-0 border px-1 text-[9px] font-bold"
+                                            style={{
+                                              backgroundColor: getOutfitEffectMeta(item.effect)!.badgeBg,
+                                              color: getOutfitEffectMeta(item.effect)!.badgeText,
+                                              borderColor: getOutfitEffectMeta(item.effect)!.badgeBorder,
+                                            }}
+                                          >
+                                            ✦ {getOutfitEffectMeta(item.effect)!.label}
+                                          </span>
+                                        )}
+                                        {getReactiveBadges(item.reactive).map((rb) => (
+                                          <span
+                                            key={rb.label}
+                                            className="shrink-0 border px-1 text-[9px] font-bold"
+                                            style={{
+                                              backgroundColor: rb.bg,
+                                              color: rb.text,
+                                              borderColor: rb.border,
+                                            }}
+                                          >
+                                            {rb.label}
+                                          </span>
+                                        ))}
                                       </div>
                                       <div dir="auto" className="truncate text-[10px] font-semibold text-[#6e4220]">
                                         {SLOT_LABELS[item.slot]} · by {item.creatorName}
@@ -9877,6 +11069,99 @@ export default function App() {
             />
           );
         })()}
+
+      {/* LIVE IN-GAME ISLAND CAMERA VIEWFINDER OVERLAY */}
+      {cameraModeOpen && !anyModalBlockingHud && (
+        <div className="pointer-events-none fixed inset-0 z-30 flex flex-col items-center justify-between p-4">
+          {cameraFlash && <div className="fixed inset-0 bg-white/80 transition-opacity" />}
+
+          {/* Top Viewfinder Status Bar */}
+          <div className="wood-panel pointer-events-auto flex items-center gap-2 border-2 border-[#45230d] px-3 py-1.5 text-xs font-bold text-[#3d1e0b] shadow-lg">
+            <Camera className="h-4 w-4 text-[#e11d48]" />
+            <span>Fashion Camera · {getCurrentZoneName()}</span>
+            <span className="border border-[#c79963] bg-[#fff7e6] px-1.5 py-0.5 text-[10px] tabular-nums">
+              {snapshots.length} saved
+            </span>
+          </div>
+
+          {/* Translucent 10:7 Viewfinder Framing Corners */}
+          <div className="relative aspect-[10/7] w-[72vw] max-w-[540px] rounded-xs border-2 border-dashed border-white/75 shadow-[0_0_0_9999px_rgba(0,0,0,0.22)]">
+            <span className="absolute -top-1 -left-1 h-5 w-5 border-t-4 border-l-4 border-[#fde047]" />
+            <span className="absolute -top-1 -right-1 h-5 w-5 border-t-4 border-r-4 border-[#fde047]" />
+            <span className="absolute -bottom-1 -left-1 h-5 w-5 border-b-4 border-l-4 border-[#fde047]" />
+            <span className="absolute -bottom-1 -right-1 h-5 w-5 border-b-4 border-r-4 border-[#fde047]" />
+          </div>
+
+          {/* Bottom Shutter & Lookbook Studio Controls */}
+          <div className="wood-panel pointer-events-auto flex flex-wrap items-center justify-center gap-2 border-2 border-[#45230d] px-3.5 py-2 shadow-xl">
+            <button
+              type="button"
+              onClick={handleCaptureSnapshot}
+              className="flex h-10 cursor-pointer items-center gap-1.5 border-2 border-[#881337] bg-[#e11d48] px-4 text-xs font-bold text-white shadow-[0_2px_0_#4c0519] hover:brightness-105 active:translate-y-0.5"
+            >
+              <Camera className="h-4 w-4" />
+              <span>Snap Photo</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setCameraModeOpen(false);
+                setLookbookOpen(true);
+              }}
+              className="flex h-10 cursor-pointer items-center gap-1.5 border-2 border-[#45230d] bg-[#fde047] px-3.5 text-xs font-bold text-[#3d1e0b] shadow-[0_2px_0_#a16207] hover:brightness-105"
+            >
+              <BookOpen className="h-4 w-4" />
+              <span>Lookbook Studio ({snapshots.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setCameraModeOpen(false);
+              }}
+              className="wood-btn flex h-10 cursor-pointer items-center gap-1 px-3 text-xs font-bold"
+            >
+              <X className="h-4 w-4" />
+              <span>Close</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* LOOKBOOK & FASHION MAGAZINE CREATOR MODAL */}
+      {lookbookOpen && (
+        <LookbookCreatorModal
+          playerName={playerName}
+          snapshots={snapshots}
+          onPlayClick={() => sfx.playClick()}
+          onOpenCamera={() => {
+            setLookbookOpen(false);
+            setCameraModeOpen(true);
+          }}
+          onDeleteSnapshot={handleDeleteSnapshot}
+          onPublishMagazine={handlePublishMagazine}
+          onClose={() => setLookbookOpen(false)}
+        />
+      )}
+
+      {/* PUBLIC ISLAND NEWSSTAND & MAGAZINE READER MODAL */}
+      {newsstandOpen && (
+        <NewsstandModal
+          magazines={magazines}
+          ownedMagazineIds={ownedMagazineIds}
+          playerId={playerId}
+          gold={gold}
+          onPlayClick={() => sfx.playClick()}
+          onOpenLookbookStudio={() => {
+            setNewsstandOpen(false);
+            setLookbookOpen(true);
+          }}
+          onBuyMagazine={handleBuyMagazine}
+          onLikeMagazine={handleLikeMagazine}
+          onClose={() => setNewsstandOpen(false)}
+        />
+      )}
     </div>
   );
 }

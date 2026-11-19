@@ -13,6 +13,11 @@ import {
   Sparkles,
   Eye,
   Plus,
+  Moon,
+  Sun,
+  CloudRain,
+  Umbrella,
+  Zap,
 } from 'lucide-react';
 import {
   GRID_SIZE,
@@ -20,6 +25,14 @@ import {
   SLOT_SILHOUETTES,
   DESIGN_FABRIC_COST,
   DESIGN_SLOT_STATS,
+  OUTFIT_EFFECTS,
+  REACTIVE_NEON_PRESETS,
+  computeAutoShimmerMask,
+  derivePrimaryItemColor,
+  drawGlowingPearlsSpriteOverlay,
+  drawNightNeonSpriteOverlay,
+  drawOutfitAmbientEffects,
+  drawRainReactiveOverlay,
   createEmptyGrid,
   cloneGrid,
   encodeGridToItemData,
@@ -27,11 +40,23 @@ import {
   generateItemUid,
   type ClothingItem,
   type ClothingSlot,
+  type OutfitEffectType,
+  type RainReactiveStyle,
+  type ReactiveOutfitConfig,
 } from './clothing';
 import type { EditionTier } from './constants';
 import type { CloudAppearance } from './firebase';
 
-type ToolKind = 'pencil' | 'eraser' | 'bucket' | 'picker';
+type ToolKind =
+  | 'pencil'
+  | 'eraser'
+  | 'bucket'
+  | 'picker'
+  | 'shade_dark'
+  | 'shade_light'
+  | 'shimmer_mark'
+  | 'neon_mark';
+type PreviewEnv = 'day' | 'night' | 'rain';
 type Direction = 'down' | 'up' | 'left' | 'right';
 
 interface HSVColor {
@@ -120,6 +145,61 @@ function hexToHsv(hex: string, fallbackHue = 2): HSVColor {
   return { h: (h + 360) % 360, s, v };
 }
 
+function rgbToHex(r: number, g: number, b: number): string {
+  const toHex = (n: number) =>
+    Math.round(clamp01(n) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function shadeHexColor(hex: string, mode: 'darken' | 'lighten'): string {
+  const clean = hex.trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return hex;
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+
+  let h = 0;
+  let s = 0;
+  if (d > 0.0001) {
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+
+  const step = 0.1;
+  const nextL =
+    mode === 'darken'
+      ? Math.max(s === 0 ? 0.04 : 0.07, l - step)
+      : Math.min(s === 0 ? 1.0 : 0.95, l + step);
+
+  if (s === 0) {
+    return rgbToHex(nextL, nextL, nextL);
+  }
+
+  const hue2rgb = (p: number, q: number, t: number) => {
+    let tt = t;
+    if (tt < 0) tt += 1;
+    if (tt > 1) tt -= 1;
+    if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+    if (tt < 1 / 2) return q;
+    if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+    return p;
+  };
+
+  const q = nextL < 0.5 ? nextL * (1 + s) : nextL + s - nextL * s;
+  const p = 2 * nextL - q;
+  return rgbToHex(hue2rgb(p, q, h + 1 / 3), hue2rgb(p, q, h), hue2rgb(p, q, h - 1 / 3));
+}
+
 function loadSavedRecentColors(): string[] {
   try {
     const raw = localStorage.getItem(RECENT_COLORS_STORAGE_KEY);
@@ -136,28 +216,64 @@ function loadSavedRecentColors(): string[] {
   return DEFAULT_RECENT_COLORS;
 }
 
+export type RareDyeIngredients = Record<OutfitEffectType, number>;
+
 interface DesignStudioModalProps {
   playerName: string;
   fabricCount: number;
+  rareIngredients: RareDyeIngredients;
   baseAppearance: CloudAppearance;
   ownedCount: number;
+  renderIngredientIcon?: (kind: OutfitEffectType, size?: number) => React.ReactNode;
   renderCharacterPreview: (
     appearance: CloudAppearance,
     dir: Direction,
-    frame: number
+    frame: number,
+    sunsetPhase?: number
   ) => HTMLCanvasElement;
   onPlayClick: () => void;
-  onCreateItem: (item: ClothingItem, fabricCost: number, equipNow: boolean) => void;
+  onCreateItem: (
+    item: ClothingItem,
+    fabricCost: number,
+    equipNow: boolean,
+    infuseEffect: OutfitEffectType | null
+  ) => void;
   onClose: () => void;
 }
 
 const SLOTS: ClothingSlot[] = ['hat', 'top', 'bottom', 'dress', 'shoes'];
 
+function createEmptyMask(): boolean[][] {
+  return Array.from({ length: GRID_SIZE }, () => Array<boolean>(GRID_SIZE).fill(false));
+}
+
+function encodeMaskToString(mask: boolean[][], grid: (string | null)[][]): string {
+  let out = '';
+  for (let y = 0; y < GRID_SIZE; y++) {
+    for (let x = 0; x < GRID_SIZE; x++) {
+      out += mask[y]?.[x] && grid[y]?.[x] ? '1' : '0';
+    }
+  }
+  return out;
+}
+
+function maskFromString(str: string): boolean[][] {
+  const m = createEmptyMask();
+  for (let y = 0; y < GRID_SIZE; y++) {
+    for (let x = 0; x < GRID_SIZE; x++) {
+      m[y][x] = str[y * GRID_SIZE + x] === '1';
+    }
+  }
+  return m;
+}
+
 export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   playerName,
   fabricCount,
+  rareIngredients,
   baseAppearance,
   ownedCount,
+  renderIngredientIcon,
   renderCharacterPreview,
   onPlayClick,
   onCreateItem,
@@ -167,6 +283,14 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   const [grid, setGrid] = useState<(string | null)[][]>(() => createEmptyGrid());
   const [history, setHistory] = useState<(string | null)[][][]>([]);
   const [tool, setTool] = useState<ToolKind>('pencil');
+  const [infuseEffect, setInfuseEffect] = useState<OutfitEffectType | null>(null);
+  const [shimmerMask, setShimmerMask] = useState<boolean[][]>(() => createEmptyMask());
+  const [nightNeonEnabled, setNightNeonEnabled] = useState<boolean>(false);
+  const [nightNeonColor, setNightNeonColor] = useState<string>(REACTIVE_NEON_PRESETS[0].hex);
+  const [nightNeonMask, setNightNeonMask] = useState<boolean[][]>(() => createEmptyMask());
+  const [rainMode, setRainMode] = useState<RainReactiveStyle | null>(null);
+  const [rainColor, setRainColor] = useState<string | null>(null);
+  const [previewEnv, setPreviewEnv] = useState<PreviewEnv>('day');
 
   const initialHex = '#e26a67';
   const [hsv, setHsv] = useState<HSVColor>(() => hexToHsv(initialHex));
@@ -195,11 +319,15 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   const activeSvPointerIdRef = useRef<number | null>(null);
   const activeHuePointerIdRef = useRef<number | null>(null);
   const strokeSnapshotRef = useRef<(string | null)[][] | null>(null);
+  const shadedCellsRef = useRef<Set<string>>(new Set());
+  const shimmerDrawModeRef = useRef<boolean>(true);
+  const neonDrawModeRef = useRef<boolean>(true);
 
   const fabricCost = DESIGN_FABRIC_COST[slot];
   const slotStats = DESIGN_SLOT_STATS[slot];
   const paintedCount = countPaintedPixels(grid);
   const canAffordFabric = fabricCount >= fabricCost;
+  const canAffordEffect = !infuseEffect || (rareIngredients[infuseEffect] || 0) >= 1;
   const bagFull = ownedCount >= 50;
 
   const commitHexToRecent = useCallback((hex: string) => {
@@ -243,7 +371,7 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       const s = clamp01((clientX - rect.left) / Math.max(1, rect.width));
       const v = clamp01(1 - (clientY - rect.top) / Math.max(1, rect.height));
       updateFromHsv({ h: hsv.h, s, v });
-      if (tool === 'eraser' || tool === 'picker') setTool('pencil');
+      if (tool !== 'pencil' && tool !== 'bucket') setTool('pencil');
     },
     [hsv.h, tool, updateFromHsv]
   );
@@ -256,14 +384,54 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       const ratio = clamp01((clientX - rect.left) / Math.max(1, rect.width));
       const nextHue = Math.min(359.99, ratio * 360);
       updateFromHsv({ h: nextHue, s: hsv.s, v: hsv.v });
-      if (tool === 'eraser' || tool === 'picker') setTool('pencil');
+      if (tool !== 'pencil' && tool !== 'bucket') setTool('pencil');
     },
     [hsv.s, hsv.v, tool, updateFromHsv]
   );
 
-  // Build live preview ClothingItem from current grid
+  // Build live preview ClothingItem from current grid + active Infuse Effect + Secondary Reactive State
+  const shimmerPixelsString = React.useMemo(
+    () => (infuseEffect === 'glowing_pearls' ? encodeMaskToString(shimmerMask, grid) : undefined),
+    [infuseEffect, shimmerMask, grid]
+  );
+
+  const nightNeonPixelsString = React.useMemo(
+    () => (nightNeonEnabled ? encodeMaskToString(nightNeonMask, grid) : undefined),
+    [nightNeonEnabled, nightNeonMask, grid]
+  );
+
+  const draftReactive: ReactiveOutfitConfig | undefined = React.useMemo(() => {
+    const out: ReactiveOutfitConfig = {};
+    if (nightNeonEnabled) {
+      const maskStr =
+        nightNeonPixelsString && nightNeonPixelsString.includes('1')
+          ? nightNeonPixelsString
+          : paintedCount > 0
+            ? computeAutoShimmerMask(grid)
+            : '';
+      if (maskStr.includes('1')) {
+        out.nightNeon = { pixels: maskStr, color: nightNeonColor };
+      }
+    }
+    if (rainMode) {
+      out.rainMode = rainMode;
+      out.rainColor = rainColor || undefined;
+    }
+    return out.nightNeon || out.rainMode ? out : undefined;
+  }, [nightNeonEnabled, nightNeonPixelsString, nightNeonColor, rainMode, rainColor, paintedCount, grid]);
+
   const draftItem: ClothingItem = React.useMemo(() => {
     const { palette, pixels } = encodeGridToItemData(grid);
+    const resolvedReactive: ReactiveOutfitConfig | undefined = draftReactive
+      ? {
+          ...draftReactive,
+          ...(draftReactive.rainMode
+            ? {
+                rainColor: draftReactive.rainColor || derivePrimaryItemColor(grid),
+              }
+            : {}),
+        }
+      : undefined;
     return {
       uid: 'draft_preview',
       name: itemName.trim() || `Custom ${SLOT_LABELS[slot]}`,
@@ -273,10 +441,15 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       palette,
       pixels,
       stats: slotStats,
+      ...(infuseEffect ? { effect: infuseEffect } : {}),
+      ...(infuseEffect === 'glowing_pearls' && shimmerPixelsString && shimmerPixelsString.includes('1')
+        ? { shimmerPixels: shimmerPixelsString }
+        : {}),
+      ...(resolvedReactive ? { reactive: resolvedReactive } : {}),
     };
-  }, [grid, itemName, slot, playerName, slotStats]);
+  }, [grid, itemName, slot, playerName, slotStats, infuseEffect, shimmerPixelsString, draftReactive]);
 
-  // Draw the zoomed-in 16x16 pixel grid canvas + faint body silhouette guide
+  // Draw the zoomed-in 16x16 pixel grid canvas + faint body silhouette guide + glow markers
   useEffect(() => {
     const c = editorCanvasRef.current;
     if (!c) return;
@@ -302,6 +475,20 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
         if (pxColor) {
           ctx.fillStyle = pxColor;
           ctx.fillRect(x * cell, y * cell, cell, cell);
+          if (infuseEffect === 'glowing_pearls' && shimmerMask[y]?.[x]) {
+            ctx.strokeStyle = '#a5f3fc';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x * cell + 2.5, y * cell + 2.5, cell - 5, cell - 5);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
+            ctx.fillRect(x * cell + 4, y * cell + 4, 4, 4);
+          }
+          if (nightNeonEnabled && nightNeonMask[y]?.[x]) {
+            ctx.strokeStyle = nightNeonColor;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x * cell + 1.5, y * cell + 1.5, cell - 3, cell - 3);
+            ctx.fillStyle = nightNeonColor;
+            ctx.fillRect(x * cell + cell - 6, y * cell + 2, 4, 4);
+          }
         }
       }
     }
@@ -329,9 +516,9 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       ctx.lineTo(c.width / 2, c.height);
       ctx.stroke();
     }
-  }, [grid, slot, showGuide, mirrorX]);
+  }, [grid, slot, showGuide, mirrorX, infuseEffect, shimmerMask, nightNeonEnabled, nightNeonMask, nightNeonColor]);
 
-  // Live Animated Character Preview wearing the drawing
+  // Live Animated Character Preview wearing the drawing + Infused Deep Sea Effect
   useEffect(() => {
     let raf = 0;
     let t = 0;
@@ -355,6 +542,8 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       if (previewWalking) t += dt * 7;
+      const timeSec = now / 1000;
+      const sunsetPhase = infuseEffect === 'sunset_amber' ? Math.floor(timeSec * 7) % 12 : 0;
 
       const c = previewCanvasRef.current;
       if (c) {
@@ -363,20 +552,116 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
           ctx.imageSmoothingEnabled = false;
           ctx.clearRect(0, 0, c.width, c.height);
 
-          ctx.fillStyle = '#bfe8f5';
-          ctx.fillRect(0, 0, c.width, 74);
-          ctx.fillStyle = '#48b1cc';
-          ctx.fillRect(0, 74, c.width, 16);
-          ctx.fillStyle = '#ebd08a';
-          ctx.fillRect(0, 90, c.width, c.height - 90);
-          ctx.fillStyle = '#d9b96e';
-          ctx.fillRect(0, 90, c.width, 3);
+          if (previewEnv === 'night') {
+            ctx.fillStyle = '#0f1c3f';
+            ctx.fillRect(0, 0, c.width, 74);
+            ctx.fillStyle = '#fef08a';
+            ctx.fillRect(14, 14, 2, 2);
+            ctx.fillRect(42, 24, 2, 2);
+            ctx.fillRect(96, 12, 2, 2);
+            ctx.fillRect(110, 32, 2, 2);
+            ctx.fillStyle = '#fef9c3';
+            ctx.fillRect(102, 16, 10, 10);
+            ctx.fillStyle = '#183f66';
+            ctx.fillRect(0, 74, c.width, 16);
+            ctx.fillStyle = '#8b795e';
+            ctx.fillRect(0, 90, c.width, c.height - 90);
+            ctx.fillStyle = '#6b5c46';
+            ctx.fillRect(0, 90, c.width, 3);
+          } else if (previewEnv === 'rain') {
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(0, 0, c.width, 74);
+            // Soft storm clouds
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(10, 8, 38, 12);
+            ctx.fillRect(72, 14, 46, 12);
+            ctx.fillStyle = '#33658a';
+            ctx.fillRect(0, 74, c.width, 16);
+            ctx.fillStyle = '#c9b37d';
+            ctx.fillRect(0, 90, c.width, c.height - 90);
+            ctx.fillStyle = '#a89362';
+            ctx.fillRect(0, 90, c.width, 3);
+          } else {
+            ctx.fillStyle = '#bfe8f5';
+            ctx.fillRect(0, 0, c.width, 74);
+            ctx.fillStyle = '#48b1cc';
+            ctx.fillRect(0, 74, c.width, 16);
+            ctx.fillStyle = '#ebd08a';
+            ctx.fillRect(0, 90, c.width, c.height - 90);
+            ctx.fillStyle = '#d9b96e';
+            ctx.fillRect(0, 90, c.width, 3);
+          }
 
           const frame = previewWalking ? Math.floor(t) % 4 : 0;
-          const sprite = renderCharacterPreview(draftAppearance, previewDir, frame);
+          const sprite = renderCharacterPreview(draftAppearance, previewDir, frame, sunsetPhase);
           ctx.fillStyle = 'rgba(46, 26, 14, 0.25)';
           ctx.fillRect(42, 114, 44, 10);
           ctx.drawImage(sprite, 24, 4, 80, 120);
+
+          if (paintedCount > 0 && infuseEffect) {
+            if (infuseEffect === 'glowing_pearls') {
+              drawGlowingPearlsSpriteOverlay(
+                ctx,
+                [draftItem],
+                previewDir,
+                frame,
+                24,
+                4,
+                5,
+                timeSec,
+                previewEnv === 'night' ? 1 : 0.22
+              );
+            } else if (infuseEffect === 'starlight_coral' || infuseEffect === 'seafoam_essence') {
+              drawOutfitAmbientEffects(
+                ctx,
+                [infuseEffect],
+                64,
+                74,
+                4,
+                timeSec,
+                previewWalking ? 'player' : 'preview'
+              );
+            }
+          }
+
+          // Secondary State: Night Mode Bioluminescent Neon Overlay
+          if (paintedCount > 0 && draftItem.reactive?.nightNeon) {
+            drawNightNeonSpriteOverlay(
+              ctx,
+              [draftItem],
+              previewDir,
+              frame,
+              24,
+              4,
+              5,
+              timeSec,
+              previewEnv === 'night' ? 1 : 0
+            );
+          }
+
+          // Secondary State: Rain Mode Umbrella / Rain Hood Overlay
+          if (paintedCount > 0 && draftItem.reactive?.rainMode && previewEnv === 'rain') {
+            drawRainReactiveOverlay(
+              ctx,
+              [draftItem],
+              previewDir,
+              frame,
+              24,
+              4,
+              5,
+              1
+            );
+          }
+
+          // Animated diagonal pixel raindrops in Rain preview
+          if (previewEnv === 'rain') {
+            ctx.fillStyle = 'rgba(219, 234, 254, 0.72)';
+            for (let i = 0; i < 18; i++) {
+              const rx = ((i * 29 + timeSec * 44) % (c.width + 20)) - 10;
+              const ry = ((i * 37 + timeSec * 160) % (c.height + 16)) - 8;
+              ctx.fillRect(Math.floor(rx), Math.floor(ry), 1.5, 7);
+            }
+          }
         }
       }
       raf = requestAnimationFrame(draw);
@@ -384,7 +669,17 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
 
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [baseAppearance, draftItem, paintedCount, previewDir, previewWalking, renderCharacterPreview, slot]);
+  }, [
+    baseAppearance,
+    draftItem,
+    paintedCount,
+    previewDir,
+    previewWalking,
+    previewEnv,
+    infuseEffect,
+    renderCharacterPreview,
+    slot,
+  ]);
 
   const pushHistory = (prevGrid: (string | null)[][]) => {
     setHistory((h) => [...h.slice(-24), cloneGrid(prevGrid)]);
@@ -424,6 +719,66 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   };
 
   const paintCell = (x: number, y: number) => {
+    if (tool === 'shimmer_mark') {
+      const mx = GRID_SIZE - 1 - x;
+      const targetVal = shimmerDrawModeRef.current;
+      setShimmerMask((prev) => {
+        if (
+          prev[y]?.[x] === targetVal &&
+          (!mirrorX || prev[y]?.[mx] === targetVal)
+        ) {
+          return prev;
+        }
+        const next = prev.map((row) => [...row]);
+        if (grid[y]?.[x]) next[y][x] = targetVal;
+        if (mirrorX && grid[y]?.[mx]) next[y][mx] = targetVal;
+        return next;
+      });
+      return;
+    }
+
+    if (tool === 'neon_mark') {
+      const mx = GRID_SIZE - 1 - x;
+      const targetVal = neonDrawModeRef.current;
+      setNightNeonMask((prev) => {
+        if (
+          prev[y]?.[x] === targetVal &&
+          (!mirrorX || prev[y]?.[mx] === targetVal)
+        ) {
+          return prev;
+        }
+        const next = prev.map((row) => [...row]);
+        if (grid[y]?.[x]) next[y][x] = targetVal;
+        if (mirrorX && grid[y]?.[mx]) next[y][mx] = targetVal;
+        return next;
+      });
+      return;
+    }
+
+    if (tool === 'shade_dark' || tool === 'shade_light') {
+      const mx = GRID_SIZE - 1 - x;
+      const key = `${x},${y}`;
+      if (shadedCellsRef.current.has(key)) return;
+      shadedCellsRef.current.add(key);
+      if (mirrorX) {
+        shadedCellsRef.current.add(`${mx},${y}`);
+      }
+      const mode = tool === 'shade_dark' ? 'darken' : 'lighten';
+      setGrid((prev) => {
+        const curA = prev[y]?.[x] || null;
+        const curB = mirrorX ? prev[y]?.[mx] || null : null;
+        if (!curA && !curB) return prev;
+        const nextA = curA ? shadeHexColor(curA, mode) : null;
+        const nextB = mirrorX && curB ? shadeHexColor(curB, mode) : null;
+        if (nextA === curA && (!mirrorX || nextB === curB)) return prev;
+        const next = cloneGrid(prev);
+        if (curA && nextA) next[y][x] = nextA;
+        if (mirrorX && curB && nextB) next[y][mx] = nextB;
+        return next;
+      });
+      return;
+    }
+
     const nextColor = tool === 'eraser' ? null : color;
     setGrid((prev) => {
       const mx = GRID_SIZE - 1 - x;
@@ -468,6 +823,21 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
     } catch {
       // ignore if capture unavailable
     }
+    shadedCellsRef.current.clear();
+    if (tool === 'shimmer_mark') {
+      shimmerDrawModeRef.current = !shimmerMask[cell.y]?.[cell.x];
+      drawingRef.current = true;
+      strokeSnapshotRef.current = null;
+      paintCell(cell.x, cell.y);
+      return;
+    }
+    if (tool === 'neon_mark') {
+      neonDrawModeRef.current = !nightNeonMask[cell.y]?.[cell.x];
+      drawingRef.current = true;
+      strokeSnapshotRef.current = null;
+      paintCell(cell.x, cell.y);
+      return;
+    }
     drawingRef.current = true;
     strokeSnapshotRef.current = cloneGrid(grid);
     paintCell(cell.x, cell.y);
@@ -489,6 +859,7 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
     if (drawingRef.current && strokeSnapshotRef.current) {
       pushHistory(strokeSnapshotRef.current);
     }
+    shadedCellsRef.current.clear();
     drawingRef.current = false;
     activeDrawPointerIdRef.current = null;
     strokeSnapshotRef.current = null;
@@ -507,6 +878,48 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
     onPlayClick();
     pushHistory(grid);
     setGrid(createEmptyGrid());
+    setShimmerMask(createEmptyMask());
+    setNightNeonMask(createEmptyMask());
+  };
+
+  const handleSelectInfuseEffect = (eff: OutfitEffectType | null) => {
+    onPlayClick();
+    setErrorMsg(null);
+    setInfuseEffect(eff);
+    if (eff === 'glowing_pearls') {
+      setPreviewEnv('night');
+      const anyMarked = shimmerMask.some((row) => row.some(Boolean));
+      if (!anyMarked && paintedCount > 0) {
+        setShimmerMask(maskFromString(computeAutoShimmerMask(grid)));
+      }
+    } else if (tool === 'shimmer_mark') {
+      setTool('pencil');
+    }
+  };
+
+  const handleToggleNightNeon = () => {
+    onPlayClick();
+    setNightNeonEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        setPreviewEnv('night');
+        const anyMarked = nightNeonMask.some((row) => row.some(Boolean));
+        if (!anyMarked && paintedCount > 0) {
+          setNightNeonMask(maskFromString(computeAutoShimmerMask(grid)));
+        }
+      } else if (tool === 'neon_mark') {
+        setTool('pencil');
+      }
+      return next;
+    });
+  };
+
+  const handleSelectRainMode = (nextMode: RainReactiveStyle | null) => {
+    onPlayClick();
+    setRainMode(nextMode);
+    if (nextMode) {
+      setPreviewEnv('rain');
+    }
   };
 
   const handleSaveCreation = () => {
@@ -518,6 +931,13 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       setErrorMsg(`Need ${fabricCost} Cotton Fabric (harvest Cotton Bushes on the island).`);
       return;
     }
+    if (!canAffordEffect && infuseEffect) {
+      const effMeta = OUTFIT_EFFECTS.find((e) => e.id === infuseEffect);
+      setErrorMsg(
+        `Need 1 ${effMeta?.ingredientName || 'rare ingredient'}! Sail deep ocean zones by boat with your pet to gather it.`
+      );
+      return;
+    }
     if (bagFull) {
       setErrorMsg('Your wardrobe bag is full (50 items max). Sell or clear space first.');
       return;
@@ -526,6 +946,22 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
     const cleanName = itemName.trim().slice(0, 32) || `Custom ${SLOT_LABELS[slot].split(' ')[0]}`;
     const { palette, pixels } = encodeGridToItemData(grid);
     const editionTotal = editionTier === 'unique' ? 1 : editionTier === 'limited' ? 5 : 10;
+    const rawShimmer =
+      infuseEffect === 'glowing_pearls'
+        ? encodeMaskToString(shimmerMask, grid) || computeAutoShimmerMask(grid)
+        : undefined;
+    const rawNeon = nightNeonEnabled
+      ? encodeMaskToString(nightNeonMask, grid) || computeAutoShimmerMask(grid)
+      : undefined;
+    const reactiveConfig: ReactiveOutfitConfig = {};
+    if (nightNeonEnabled && rawNeon && rawNeon.includes('1')) {
+      reactiveConfig.nightNeon = { pixels: rawNeon, color: nightNeonColor };
+    }
+    if (rainMode) {
+      reactiveConfig.rainMode = rainMode;
+      reactiveConfig.rainColor = rainColor || derivePrimaryItemColor(grid);
+    }
+    const hasReactive = Boolean(reactiveConfig.nightNeon || reactiveConfig.rainMode);
     const created: ClothingItem = {
       uid: generateItemUid('cus'),
       name: cleanName,
@@ -535,13 +971,18 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       palette,
       pixels,
       stats: slotStats,
+      ...(infuseEffect ? { effect: infuseEffect } : {}),
+      ...(infuseEffect === 'glowing_pearls' && rawShimmer && rawShimmer.includes('1')
+        ? { shimmerPixels: rawShimmer }
+        : {}),
+      ...(hasReactive ? { reactive: reactiveConfig } : {}),
       editionId: generateItemUid('ed'),
       editionSerial: 1,
       editionTotal,
       editionTier,
     };
 
-    onCreateItem(created, fabricCost, equipNow);
+    onCreateItem(created, fabricCost, equipNow, infuseEffect);
   };
 
   const turnPreview = (delta: number) => {
@@ -730,6 +1171,48 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
               </div>
             </div>
 
+            {/* Shading Brush: Hue-preserving Darken (Shadow) & Lighten (Highlight) */}
+            <div className="flex w-full flex-col gap-1 rounded-sm border border-[#c79963] bg-[#f5e6c8] p-1.5">
+              <div className="flex items-center justify-between px-0.5 text-[10px] font-bold text-[#522b14]">
+                <span>Shading Brush</span>
+                <span className="font-semibold text-[#754623]">Shifts existing pixel lightness</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  title="Shading Brush — Darken (Shadow): shifts painted pixels darker while keeping hue"
+                  onClick={() => {
+                    onPlayClick();
+                    setTool((t) => (t === 'shade_dark' ? 'pencil' : 'shade_dark'));
+                  }}
+                  className={`flex h-8 cursor-pointer items-center justify-center gap-1 border-2 px-2 text-[11px] font-bold whitespace-nowrap transition-colors ${
+                    tool === 'shade_dark'
+                      ? 'border-[#312e81] bg-[#4338ca] text-[#eef2ff]'
+                      : 'border-[#966236] bg-[#fff7e6] text-[#4d2912] hover:bg-[#ffe8b3]'
+                  }`}
+                >
+                  <Moon className="h-3.5 w-3.5 shrink-0" />
+                  <span>Darken (Shadow)</span>
+                </button>
+                <button
+                  type="button"
+                  title="Shading Brush — Lighten (Highlight): shifts painted pixels lighter while keeping hue"
+                  onClick={() => {
+                    onPlayClick();
+                    setTool((t) => (t === 'shade_light' ? 'pencil' : 'shade_light'));
+                  }}
+                  className={`flex h-8 cursor-pointer items-center justify-center gap-1 border-2 px-2 text-[11px] font-bold whitespace-nowrap transition-colors ${
+                    tool === 'shade_light'
+                      ? 'border-[#92400e] bg-[#f59e0b] text-[#291709]'
+                      : 'border-[#966236] bg-[#fff7e6] text-[#4d2912] hover:bg-[#ffe8b3]'
+                  }`}
+                >
+                  <Sun className="h-3.5 w-3.5 shrink-0" />
+                  <span>Lighten (Highlight)</span>
+                </button>
+              </div>
+            </div>
+
             <canvas
               ref={editorCanvasRef}
               width={320}
@@ -742,22 +1225,151 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
             />
 
             <div className="flex w-full items-center justify-between text-[11px] font-semibold text-[#6b3c1b]">
-              <span>Guide: {SLOT_LABELS[slot]}</span>
+              <span>
+                {tool === 'neon_mark'
+                  ? 'Neon Brush: tap painted pixels to glow in the dark'
+                  : tool === 'shimmer_mark'
+                    ? 'Glow Brush: tap painted pixels to toggle Pearl Glow'
+                    : tool === 'shade_dark'
+                      ? 'Shadow Brush: draw over pixels to darken'
+                      : tool === 'shade_light'
+                        ? 'Highlight Brush: draw over pixels to lighten'
+                        : `Guide: ${SLOT_LABELS[slot]}`}
+              </span>
               <span className="tabular-nums">{paintedCount} px drawn</span>
             </div>
+
+            {infuseEffect === 'glowing_pearls' && (
+              <div className="flex w-full items-center justify-between gap-1.5 rounded-sm border border-[#0891b2] bg-[#ecfeff] p-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onPlayClick();
+                    setTool((t) => (t === 'shimmer_mark' ? 'pencil' : 'shimmer_mark'));
+                  }}
+                  className={`flex h-7 flex-1 cursor-pointer items-center justify-center gap-1 border px-2 text-[11px] font-bold ${
+                    tool === 'shimmer_mark'
+                      ? 'border-[#0e7490] bg-[#06b6d4] text-white'
+                      : 'border-[#0891b2] bg-white text-[#0e7490] hover:bg-[#cffafe]'
+                  }`}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>{tool === 'shimmer_mark' ? 'Pearl Glow Brush On' : 'Select Pearl Pixels'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onPlayClick();
+                    setShimmerMask(maskFromString(computeAutoShimmerMask(grid)));
+                  }}
+                  className="h-7 cursor-pointer border border-[#0891b2] bg-[#cffafe] px-2 text-[10px] font-bold text-[#0e7490] hover:bg-[#a5f3fc]"
+                >
+                  Auto-Glow
+                </button>
+              </div>
+            )}
+
+            {nightNeonEnabled && (
+              <div className="flex w-full flex-col gap-1.5 rounded-sm border border-[#7c3aed] bg-[#1e1b4b] p-2 text-white">
+                <div className="flex items-center justify-between gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPlayClick();
+                      setTool((t) => (t === 'neon_mark' ? 'pencil' : 'neon_mark'));
+                    }}
+                    className={`flex h-7 flex-1 cursor-pointer items-center justify-center gap-1 border px-2 text-[11px] font-bold ${
+                      tool === 'neon_mark'
+                        ? 'border-white bg-[#a855f7] text-white'
+                        : 'border-[#818cf8] bg-[#312e81] text-[#e0e7ff] hover:bg-[#3730a3]'
+                    }`}
+                  >
+                    <Zap className="h-3 w-3" />
+                    <span>{tool === 'neon_mark' ? 'Neon Brush Active' : 'Paint Neon Pixels'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPlayClick();
+                      setNightNeonMask(maskFromString(computeAutoShimmerMask(grid)));
+                    }}
+                    className="h-7 cursor-pointer border border-[#818cf8] bg-[#312e81] px-2 text-[10px] font-bold text-[#e0e7ff] hover:bg-[#4338ca]"
+                  >
+                    Auto-Neon
+                  </button>
+                </div>
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[10px] font-bold text-[#c7d2fe]">Bioluminescent Glow:</span>
+                  <div className="flex items-center gap-1">
+                    {REACTIVE_NEON_PRESETS.map((preset) => (
+                      <button
+                        key={preset.hex}
+                        type="button"
+                        title={preset.label}
+                        onClick={() => {
+                          onPlayClick();
+                          setNightNeonColor(preset.hex);
+                        }}
+                        className={`h-5 w-5 cursor-pointer border-2 ${
+                          nightNeonColor.toLowerCase() === preset.hex.toLowerCase()
+                            ? 'scale-110 border-white ring-1 ring-white'
+                            : 'border-black/50 opacity-85 hover:opacity-100'
+                        }`}
+                        style={{ backgroundColor: preset.hex }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Right: Live Walking Preview, Full HSV Picker, Name & Craft */}
+          {/* Right: Live Walking Preview, Full HSV Picker, Infuse Effect & Craft */}
           <div className="flex flex-col justify-between gap-3">
             <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-[164px_1fr]">
               {/* Live Animated Character Preview */}
               <div className="flex flex-col items-center justify-between gap-2 rounded-sm border-2 border-[#c79963] bg-[#ebd2a4] p-2.5">
-                <canvas
-                  ref={previewCanvasRef}
-                  width={128}
-                  height={132}
-                  className="pixelated h-[144px] w-36 border-2 border-[#6b3c1b] bg-[#bfe8f5]"
-                />
+                <div className="relative">
+                  <canvas
+                    ref={previewCanvasRef}
+                    width={128}
+                    height={132}
+                    className="pixelated h-[144px] w-36 border-2 border-[#6b3c1b] bg-[#bfe8f5]"
+                  />
+                  <div className="mt-1 grid grid-cols-3 gap-1">
+                    {(
+                      [
+                        { id: 'day', label: 'Day', icon: <Sun className="h-2.5 w-2.5" /> },
+                        { id: 'night', label: 'Night', icon: <Moon className="h-2.5 w-2.5" /> },
+                        { id: 'rain', label: 'Rain', icon: <CloudRain className="h-2.5 w-2.5" /> },
+                      ] as const
+                    ).map((env) => {
+                      const active = previewEnv === env.id;
+                      return (
+                        <button
+                          key={env.id}
+                          type="button"
+                          onClick={() => {
+                            onPlayClick();
+                            setPreviewEnv(env.id);
+                          }}
+                          className={`flex h-6 cursor-pointer items-center justify-center gap-0.5 border text-[9px] font-bold ${
+                            active
+                              ? env.id === 'night'
+                                ? 'border-[#fde047] bg-[#0f1c3f] text-[#fef08a]'
+                                : env.id === 'rain'
+                                  ? 'border-[#0369a1] bg-[#0284c7] text-white'
+                                  : 'border-[#45230d] bg-[#b86f34] text-[#fff8e7]'
+                              : 'border-[#966236] bg-[#f5e6c8] text-[#45230d] hover:bg-[#fff7e6]'
+                          }`}
+                        >
+                          {env.icon}
+                          <span>{env.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
                 <div className="flex w-full items-center justify-between gap-1">
                   <button
                     type="button"
@@ -958,7 +1570,7 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
                           onClick={() => {
                             onPlayClick();
                             selectHexColor(swatch, false);
-                            if (tool === 'eraser' || tool === 'picker') setTool('pencil');
+                            if (tool !== 'pencil' && tool !== 'bucket') setTool('pencil');
                           }}
                           className={`h-6 w-full cursor-pointer border-2 ${
                             active
@@ -1034,9 +1646,179 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
                 </div>
               </div>
 
+              {/* Deep Sea Dye Infuse Effect Slot */}
+              <div className="rounded-sm border border-[#966236] bg-[#f5e6c8] p-2">
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1 text-xs font-bold text-[#522b14]">
+                  <span className="flex items-center gap-1">
+                    <Sparkles className="h-3.5 w-3.5 text-[#0891b2]" />
+                    <span>Infuse Effect (Deep Sea Dye Slot)</span>
+                  </span>
+                  <span className="text-[10px] font-semibold text-[#6b3c1b]">
+                    Optional · Costs 1 rare ocean ingredient
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectInfuseEffect(null)}
+                    className={`flex cursor-pointer flex-col items-center justify-center border-2 px-1.5 py-1.5 text-center transition-colors ${
+                      infuseEffect === null
+                        ? 'border-[#45230d] bg-[#fff3d6] ring-2 ring-[#e6b23c]'
+                        : 'border-[#966236] bg-[#ebd2a4] hover:bg-[#fff7e6]'
+                    }`}
+                  >
+                    <span className="text-[11px] font-bold text-[#3d1e0b]">None</span>
+                    <span className="text-[9px] font-semibold text-[#6b3c1b]">Classic Fabric</span>
+                  </button>
+                  {OUTFIT_EFFECTS.map((eff) => {
+                    const ownedAmt = rareIngredients[eff.id] || 0;
+                    const active = infuseEffect === eff.id;
+                    return (
+                      <button
+                        key={eff.id}
+                        type="button"
+                        title={eff.description}
+                        onClick={() => handleSelectInfuseEffect(eff.id)}
+                        className={`flex cursor-pointer items-center gap-1.5 border-2 px-1.5 py-1 text-left transition-colors ${
+                          active
+                            ? 'border-[#45230d] bg-[#fff3d6] ring-2 ring-[#e6b23c]'
+                            : ownedAmt > 0
+                              ? 'border-[#966236] bg-[#fff7e6] hover:bg-[#fef3c7]'
+                              : 'border-[#966236]/75 bg-[#e6cea3] opacity-85 hover:opacity-100'
+                        }`}
+                      >
+                        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-xs border border-[#6b3c1b]/50 bg-[#184b6b]/15">
+                          {renderIngredientIcon ? (
+                            renderIngredientIcon(eff.id, 18)
+                          ) : (
+                            <span
+                              className="h-3 w-3 rounded-full"
+                              style={{ backgroundColor: eff.accentHex }}
+                            />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[10px] font-bold text-[#3d1e0b]">{eff.label}</div>
+                          <div
+                            className={`tabular-nums text-[9px] font-bold ${
+                              ownedAmt > 0 ? 'text-[#1c5e32]' : 'text-[#a62b2b]'
+                            }`}
+                          >
+                            {eff.shortLabel} · ×{ownedAmt}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                {infuseEffect && (
+                  <div className="mt-1.5 text-[10px] font-semibold text-[#522b14]">
+                    {OUTFIT_EFFECTS.find((e) => e.id === infuseEffect)?.description}
+                  </div>
+                )}
+              </div>
+
+              {/* Weather & Day/Night Reactive Secondary State */}
+              <div className="rounded-sm border border-[#6366f1] bg-[#eef2ff] p-2.5">
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1 text-xs font-bold text-[#1e1b4b]">
+                  <span className="flex items-center gap-1">
+                    <Zap className="h-3.5 w-3.5 text-[#4f46e5]" />
+                    <span>Secondary State (Weather &amp; Night Reactive)</span>
+                  </span>
+                  <span className="text-[10px] font-semibold text-[#4338ca]">
+                    Free · Triggers automatically at night or in rain
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {/* Night Mode Bioluminescent Toggle */}
+                  <div className="flex flex-col justify-between gap-1.5 rounded-xs border border-[#818cf8] bg-white/85 p-2">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="flex items-center gap-1 text-[11px] font-bold text-[#1e1b4b]">
+                        <Moon className="h-3.5 w-3.5 text-[#4f46e5]" />
+                        <span>Night Mode Glow</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleToggleNightNeon}
+                        className={`h-6 cursor-pointer border-2 px-2 text-[10px] font-bold transition-colors ${
+                          nightNeonEnabled
+                            ? 'border-[#312e81] bg-[#4f46e5] text-white'
+                            : 'border-[#94a3b8] bg-[#f1f5f9] text-[#334155] hover:bg-[#e2e8f0]'
+                        }`}
+                      >
+                        {nightNeonEnabled ? 'ON' : 'OFF'}
+                      </button>
+                    </div>
+                    <p className="text-[10px] leading-tight text-[#475569]">
+                      Selected pixels switch to pulsing neon/bioluminescent glow in the dark.
+                    </p>
+                  </div>
+
+                  {/* Rain Mode Auto Umbrella / Hood Selector */}
+                  <div className="flex flex-col justify-between gap-1.5 rounded-xs border border-[#38bdf8] bg-white/85 p-2">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="flex items-center gap-1 text-[11px] font-bold text-[#0c4a6e]">
+                        <CloudRain className="h-3.5 w-3.5 text-[#0284c7]" />
+                        <span>Rain Mode Gear</span>
+                      </span>
+                      {rainMode && (
+                        <button
+                          type="button"
+                          title="Match current swatch color"
+                          onClick={() => {
+                            onPlayClick();
+                            setRainColor(color);
+                            setPreviewEnv('rain');
+                          }}
+                          className="flex cursor-pointer items-center gap-1 border border-[#0284c7] bg-[#e0f2fe] px-1.5 py-0.5 text-[9px] font-bold text-[#0369a1]"
+                        >
+                          <span
+                            className="h-2.5 w-2.5 border border-[#0c4a6e]"
+                            style={{ backgroundColor: rainColor || color }}
+                          />
+                          <span>Use Swatch</span>
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(
+                        [
+                          { id: null, label: 'None' },
+                          { id: 'umbrella', label: 'Umbrella' },
+                          { id: 'hood', label: 'Rain Hood' },
+                        ] as const
+                      ).map((opt) => {
+                        const active = rainMode === opt.id;
+                        return (
+                          <button
+                            key={String(opt.id)}
+                            type="button"
+                            onClick={() => handleSelectRainMode(opt.id)}
+                            className={`flex h-6 cursor-pointer items-center justify-center gap-0.5 border text-[10px] font-bold ${
+                              active
+                                ? 'border-[#0c4a6e] bg-[#0284c7] text-white'
+                                : 'border-[#7dd3fc] bg-[#f0f9ff] text-[#0369a1] hover:bg-[#e0f2fe]'
+                            }`}
+                          >
+                            {opt.id === 'umbrella' && <Umbrella className="h-2.5 w-2.5" />}
+                            <span>{opt.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
-                <span className={canAffordFabric ? 'text-[#1c5e32]' : 'text-[#a62b2b]'}>
-                  Crafting Cost: {fabricCost} Cotton Fabric (You have {fabricCount})
+                <span className={canAffordFabric && canAffordEffect ? 'text-[#1c5e32]' : 'text-[#a62b2b]'}>
+                  Cost: {fabricCost} Fabric (Have {fabricCount})
+                  {infuseEffect
+                    ? ` + 1 ${OUTFIT_EFFECTS.find((e) => e.id === infuseEffect)?.ingredientName} (Have ${
+                        rareIngredients[infuseEffect] || 0
+                      })`
+                    : ''}
                 </span>
                 <label className="flex cursor-pointer items-center gap-1.5 text-[#45230d]">
                   <input
@@ -1069,16 +1851,20 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
               </button>
               <button
                 type="button"
-                disabled={!canAffordFabric || bagFull}
+                disabled={!canAffordFabric || !canAffordEffect || bagFull}
                 onClick={handleSaveCreation}
                 className={`flex h-10 items-center gap-1.5 px-5 text-sm font-bold whitespace-nowrap ${
-                  canAffordFabric && !bagFull
+                  canAffordFabric && canAffordEffect && !bagFull
                     ? 'wood-btn cursor-pointer'
                     : 'cursor-not-allowed border-2 border-[#7a5233] bg-[#c7aa82] text-[#6b4d35] opacity-75'
                 }`}
               >
                 <Sparkles className="h-4 w-4" />
-                <span>Craft Design ({fabricCost} Fabric)</span>
+                <span>
+                  {infuseEffect
+                    ? `Craft + Infuse (${fabricCost} Fabric + 1 Dye)`
+                    : `Craft Design (${fabricCost} Fabric)`}
+                </span>
               </button>
             </div>
           </div>

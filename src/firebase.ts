@@ -26,7 +26,17 @@ import {
   type ClothingSlot,
   type ClothingSource,
 } from './clothing';
-import { clampShopTier, type BoatKind, type EditionTier, type PetKind, type ShopTier } from './constants';
+import {
+  clampShopTier,
+  normalizeShimmerPixels,
+  sanitizeReactiveConfig,
+  VALID_OUTFIT_EFFECTS,
+  type BoatKind,
+  type EditionTier,
+  type OutfitEffectType,
+  type PetKind,
+  type ShopTier,
+} from './constants';
 
 function hasValidConfig(cfg: Record<string, unknown>): boolean {
   const apiKey = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : '';
@@ -323,6 +333,10 @@ export interface CloudInventory {
   dyes: number;
   golden_pearls: number;
   royal_silk: number;
+  glowing_pearls: number;
+  starlight_coral: number;
+  seafoam_essence: number;
+  sunset_amber: number;
   dock_plank: number;
   shop_wall: number;
   mannequin: number;
@@ -364,6 +378,7 @@ export interface CloudPlayerProfile {
   equippedBoat?: BoatKind | null;
   ownedPets?: PetKind[];
   equippedPet?: PetKind | null;
+  ownedMagazineIds?: string[];
   totalSales?: number;
   editionMintCounts?: Record<string, number>;
   lastSale?: CloudLastSale | null;
@@ -439,6 +454,36 @@ export interface CloudWorldStructure {
   updatedAt?: Timestamp;
 }
 
+export type MagazineTheme = 'coral_vogue' | 'midnight_neon' | 'seaside_pastel' | 'royal_gold';
+
+export interface MagazineSticker {
+  id: string;
+  stickerId: string;
+  x: number; // 0..100 (% of page photo)
+  y: number; // 0..100 (% of page photo)
+}
+
+export interface MagazinePage {
+  photoDataUrl: string;
+  caption: string;
+  location?: string;
+  stickers: MagazineSticker[];
+}
+
+export interface CloudMagazine {
+  id: string;
+  title: string;
+  subtitle: string;
+  authorId: string;
+  authorName: string;
+  theme: MagazineTheme;
+  price: number;
+  salesCount: number;
+  likesCount: number;
+  pages: MagazinePage[];
+  createdAtMs: number;
+}
+
 const PLAYER_ID_KEY = 'coral_cove_player_id';
 const PLAYER_NAME_KEY = 'coral_cove_player_name';
 
@@ -447,10 +492,11 @@ const LOCAL_PLAYERS_KEY = 'coral_cove_local_players_v1';
 const LOCAL_ONLINE_KEY = 'coral_cove_local_online_v1';
 const LOCAL_STRUCTURES_KEY = 'coral_cove_local_structures_v1';
 const LOCAL_AUCTION_KEY = 'coral_cove_local_auction_v1';
+const LOCAL_MAGAZINES_KEY = 'coral_cove_local_magazines_v1';
 const PENDING_SYNC_KEY = 'coral_cove_pending_sync_v1';
 const SESSION_CHANNEL_NAME = 'coral_cove_session_sync_v1';
 
-type SessionTopic = 'players' | 'online_players' | 'world_structures' | 'auctions';
+type SessionTopic = 'players' | 'online_players' | 'world_structures' | 'auctions' | 'magazines';
 
 interface LocalOnlineRecord extends Omit<CloudOnlinePlayer, 'updatedAt'> {
   updatedAtMs: number;
@@ -506,6 +552,7 @@ const localTopicListeners: Record<SessionTopic, Set<() => void>> = {
   online_players: new Set(),
   world_structures: new Set(),
   auctions: new Set(),
+  magazines: new Set(),
 };
 
 let sessionChannel: BroadcastChannel | null = null;
@@ -533,6 +580,8 @@ if (typeof window !== 'undefined') {
       localTopicListeners.world_structures.forEach((cb) => cb());
     } else if (event.key === LOCAL_AUCTION_KEY) {
       localTopicListeners.auctions.forEach((cb) => cb());
+    } else if (event.key === LOCAL_MAGAZINES_KEY) {
+      localTopicListeners.magazines.forEach((cb) => cb());
     }
   });
 }
@@ -668,6 +717,20 @@ function sanitizeMintCounts(raw: unknown): Record<string, number> {
   return out;
 }
 
+function sanitizeMagazineIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const id of raw) {
+    if (typeof id === 'string') {
+      const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+      if (cleaned.length >= 2 && !out.includes(cleaned)) {
+        out.push(cleaned);
+      }
+    }
+  }
+  return out.slice(0, 120);
+}
+
 function saveLocalPlayerRecord(profile: Omit<CloudPlayerProfile, 'updatedAt' | '_migratedFromLegacy'>): void {
   const map = readJsonRecord<Record<string, LocalProfileRecord>>(LOCAL_PLAYERS_KEY, {});
   const existing = map[profile.playerId];
@@ -692,6 +755,7 @@ function saveLocalPlayerRecord(profile: Omit<CloudPlayerProfile, 'updatedAt' | '
     equippedBoat,
     ownedPets: sanitizePetList(profile.ownedPets ?? existing?.ownedPets),
     equippedPet: sanitizeEquippedPet(profile.equippedPet !== undefined ? profile.equippedPet : existing?.equippedPet),
+    ownedMagazineIds: sanitizeMagazineIds(profile.ownedMagazineIds ?? existing?.ownedMagazineIds),
     totalSales: Math.max(0, Math.round(Number(profile.totalSales ?? existing?.totalSales ?? 0))),
     editionMintCounts: sanitizeMintCounts(profile.editionMintCounts ?? existing?.editionMintCounts),
     lastSale: profile.lastSale ?? existing?.lastSale ?? null,
@@ -712,6 +776,7 @@ function readLocalPlayerProfile(playerId: string): CloudPlayerProfile | null {
     equippedBoat: sanitizeEquippedBoat(rec.equippedBoat, rec.hasBoat),
     ownedPets: sanitizePetList(rec.ownedPets),
     equippedPet: sanitizeEquippedPet(rec.equippedPet),
+    ownedMagazineIds: sanitizeMagazineIds(rec.ownedMagazineIds),
     updatedAt: makeLocalTimestamp(rec.updatedAtMs || Date.now()),
   };
 }
@@ -862,6 +927,7 @@ export async function flushPendingSyncToCloud(): Promise<void> {
               equippedBoat: sanitizeEquippedBoat(localProfile.equippedBoat, localProfile.hasBoat),
               ownedPets: sanitizePetList(localProfile.ownedPets),
               equippedPet: sanitizeEquippedPet(localProfile.equippedPet),
+              ownedMagazineIds: sanitizeMagazineIds(localProfile.ownedMagazineIds),
               totalSales: Math.max(0, Math.round(Number(localProfile.totalSales || 0))),
               editionMintCounts: sanitizeMintCounts(localProfile.editionMintCounts),
               updatedAt: serverTimestamp(),
@@ -987,6 +1053,13 @@ export function sanitizeClothingItem(item: ClothingItem): ClothingItem {
     },
   };
 
+  if (item.effect && VALID_OUTFIT_EFFECTS.includes(item.effect as OutfitEffectType)) {
+    sanitized.effect = item.effect as OutfitEffectType;
+  }
+  const cleanShimmer = normalizeShimmerPixels(item.shimmerPixels);
+  if (cleanShimmer) {
+    sanitized.shimmerPixels = cleanShimmer;
+  }
   if (typeof item.editionId === 'string' && item.editionId.trim().length > 0) {
     sanitized.editionId = item.editionId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
   }
@@ -998,6 +1071,10 @@ export function sanitizeClothingItem(item: ClothingItem): ClothingItem {
   }
   if (item.editionTier && VALID_TIERS.includes(item.editionTier)) {
     sanitized.editionTier = item.editionTier;
+  }
+  const cleanReactive = sanitizeReactiveConfig(item.reactive);
+  if (cleanReactive) {
+    sanitized.reactive = cleanReactive;
   }
 
   return sanitized;
@@ -1030,6 +1107,10 @@ function sanitizeInventory(inv: Partial<CloudInventory> | CloudInventory): Cloud
     dyes: clamp(inv.dyes),
     golden_pearls: clamp(inv.golden_pearls),
     royal_silk: clamp(inv.royal_silk),
+    glowing_pearls: clamp(inv.glowing_pearls),
+    starlight_coral: clamp(inv.starlight_coral),
+    seafoam_essence: clamp(inv.seafoam_essence),
+    sunset_amber: clamp(inv.sunset_amber),
     dock_plank: clamp(inv.dock_plank),
     shop_wall: clamp(inv.shop_wall),
     mannequin: clamp(inv.mannequin),
@@ -1144,6 +1225,7 @@ export async function savePlayerProfile(
     equippedBoat,
     ownedPets: sanitizePetList(profile.ownedPets),
     equippedPet: sanitizeEquippedPet(profile.equippedPet),
+    ownedMagazineIds: sanitizeMagazineIds(profile.ownedMagazineIds),
     totalSales: Math.max(0, Math.round(Number(profile.totalSales || 0))),
     editionMintCounts: sanitizeMintCounts(profile.editionMintCounts),
     updatedAt: serverTimestamp(),
@@ -2278,4 +2360,341 @@ export async function settleCurrentAuction(auctionId: string): Promise<CloudAuct
 
   return settleLocal();
 }
+
+// ============================================================================
+// INTERACTIVE LOOKBOOK & ISLAND NEWSSTAND MAGAZINES
+// ============================================================================
+
+const VALID_MAGAZINE_THEMES: MagazineTheme[] = [
+  'coral_vogue',
+  'midnight_neon',
+  'seaside_pastel',
+  'royal_gold',
+];
+
+function sanitizeMagazineSticker(raw: unknown): MagazineSticker | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const stickerId = String(r.stickerId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+  if (!stickerId) return null;
+  const id = String(r.id || `stk_${Math.random().toString(36).slice(2, 8)}`).slice(0, 48);
+  const x = Math.max(5, Math.min(95, Math.round((Number(r.x) || 50) * 10) / 10));
+  const y = Math.max(8, Math.min(92, Math.round((Number(r.y) || 50) * 10) / 10));
+  return { id, stickerId, x, y };
+}
+
+function sanitizeMagazinePage(raw: unknown): MagazinePage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const photoDataUrl = typeof r.photoDataUrl === 'string' ? r.photoDataUrl : '';
+  if (!photoDataUrl.startsWith('data:image/') || photoDataUrl.length > 90000) return null;
+  const caption = String(r.caption || '').trim().slice(0, 140);
+  const location = typeof r.location === 'string' ? r.location.trim().slice(0, 40) : undefined;
+  const stickersRaw = Array.isArray(r.stickers) ? r.stickers : [];
+  const stickers = stickersRaw
+    .map(sanitizeMagazineSticker)
+    .filter((s): s is MagazineSticker => Boolean(s))
+    .slice(0, 6);
+  return {
+    photoDataUrl,
+    caption,
+    ...(location ? { location } : {}),
+    stickers,
+  };
+}
+
+export function sanitizeCloudMagazine(raw: Partial<CloudMagazine> | Record<string, unknown>): CloudMagazine | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const pagesRaw = Array.isArray(r.pages) ? r.pages : [];
+  const pages = pagesRaw
+    .map(sanitizeMagazinePage)
+    .filter((p): p is MagazinePage => Boolean(p))
+    .slice(0, 6);
+  if (pages.length === 0) return null;
+  const theme: MagazineTheme = VALID_MAGAZINE_THEMES.includes(r.theme as MagazineTheme)
+    ? (r.theme as MagazineTheme)
+    : 'coral_vogue';
+  const id = sanitizeUid(String(r.id || `mag_${Date.now().toString(36)}`));
+  return {
+    id,
+    title: sanitizeName(String(r.title || 'Coral Cove Issue'), 42),
+    subtitle: String(r.subtitle || '').trim().slice(0, 72),
+    authorId: sanitizeUid(String(r.authorId || 'island_press')),
+    authorName: sanitizeName(String(r.authorName || 'Islander'), 20),
+    theme,
+    price: Math.max(0, Math.min(500, Math.round(Number(r.price) || 0))),
+    salesCount: Math.max(0, Math.floor(Number(r.salesCount) || 0)),
+    likesCount: Math.max(0, Math.floor(Number(r.likesCount) || 0)),
+    pages,
+    createdAtMs: Number(r.createdAtMs) > 0 ? Number(r.createdAtMs) : Date.now(),
+  };
+}
+
+function readLocalMagazines(): CloudMagazine[] {
+  const map = readJsonRecord<Record<string, CloudMagazine>>(LOCAL_MAGAZINES_KEY, {});
+  const out: CloudMagazine[] = [];
+  for (const item of Object.values(map)) {
+    const clean = sanitizeCloudMagazine(item);
+    if (clean) out.push(clean);
+  }
+  return out.sort((a, b) => b.createdAtMs - a.createdAtMs);
+}
+
+function saveLocalMagazine(mag: CloudMagazine): void {
+  const map = readJsonRecord<Record<string, CloudMagazine>>(LOCAL_MAGAZINES_KEY, {});
+  map[mag.id] = mag;
+  // Cap local cache to 24 newest issues to stay safe with localStorage quota
+  const entries = Object.values(map).sort((a, b) => b.createdAtMs - a.createdAtMs).slice(0, 24);
+  const trimmed: Record<string, CloudMagazine> = {};
+  for (const e of entries) trimmed[e.id] = e;
+  writeJsonRecord(LOCAL_MAGAZINES_KEY, trimmed);
+  notifyTopic('magazines');
+}
+
+export function subscribeMagazines(onUpdate: (magazines: CloudMagazine[]) => void): Unsubscribe {
+  let latestCloud: CloudMagazine[] = [];
+
+  const emitMerged = () => {
+    const merged = new Map<string, CloudMagazine>();
+    for (const lm of readLocalMagazines()) {
+      merged.set(lm.id, lm);
+    }
+    for (const cm of latestCloud) {
+      merged.set(cm.id, cm);
+    }
+    onUpdate(Array.from(merged.values()).sort((a, b) => b.createdAtMs - a.createdAtMs));
+  };
+
+  emitMerged();
+  const unsubLocal = subscribeTopic('magazines', emitMerged);
+
+  if (!db) {
+    return unsubLocal;
+  }
+
+  const unsubCloud = onSnapshot(
+    collection(db, 'magazines'),
+    (snap) => {
+      const list: CloudMagazine[] = [];
+      snap.forEach((d) => {
+        const clean = sanitizeCloudMagazine({ ...(d.data() as Record<string, unknown>), id: d.id });
+        if (clean) list.push(clean);
+      });
+      latestCloud = list;
+      setCloudHealthy(true);
+      emitMerged();
+    },
+    (error) => {
+      logCloudFallbackError('subscribeMagazines', OperationType.LIST, 'magazines', error);
+      setCloudHealthy(false);
+      emitMerged();
+    }
+  );
+
+  return () => {
+    unsubLocal();
+    unsubCloud();
+  };
+}
+
+export async function publishMagazine(params: {
+  title: string;
+  subtitle: string;
+  authorId: string;
+  authorName: string;
+  theme: MagazineTheme;
+  price: number;
+  pages: MagazinePage[];
+}): Promise<{ magazine: CloudMagazine; syncedToCloud: boolean }> {
+  const now = Date.now();
+  const id = `mag_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const clean = sanitizeCloudMagazine({
+    id,
+    title: params.title,
+    subtitle: params.subtitle,
+    authorId: params.authorId,
+    authorName: params.authorName,
+    theme: params.theme,
+    price: params.price,
+    salesCount: 0,
+    likesCount: 0,
+    pages: params.pages,
+    createdAtMs: now,
+  });
+  if (!clean) {
+    throw new Error('Add at least 1 snapshot page before publishing your magazine.');
+  }
+
+  saveLocalMagazine(clean);
+
+  if (!db) {
+    return { magazine: clean, syncedToCloud: false };
+  }
+
+  try {
+    await ensureAnonymousAuth();
+    await withTimeout(setDoc(doc(db, 'magazines', clean.id), clean), 5000, 'publishMagazine');
+    setCloudHealthy(true);
+    return { magazine: clean, syncedToCloud: true };
+  } catch (error) {
+    logCloudFallbackError('publishMagazine', OperationType.CREATE, `magazines/${clean.id}`, error);
+    setCloudHealthy(false);
+    return { magazine: clean, syncedToCloud: false };
+  }
+}
+
+export async function purchaseMagazine(params: {
+  magazine: CloudMagazine;
+  buyerId: string;
+  buyerName: string;
+}): Promise<{ newBuyerGold: number; pricePaid: number; syncedToCloud: boolean }> {
+  const { magazine, buyerId, buyerName } = params;
+  const price = Math.max(0, Math.round(magazine.price || 0));
+
+  const executeLocal = (): { newBuyerGold: number; pricePaid: number; syncedToCloud: boolean } => {
+    const playerMap = readJsonRecord<Record<string, LocalProfileRecord>>(LOCAL_PLAYERS_KEY, {});
+    const buyer = playerMap[buyerId];
+    if (!buyer) throw new Error('Player profile not ready yet.');
+    const alreadyOwned =
+      magazine.authorId === buyerId ||
+      (Array.isArray(buyer.ownedMagazineIds) && buyer.ownedMagazineIds.includes(magazine.id));
+    if (alreadyOwned) {
+      return { newBuyerGold: buyer.gold, pricePaid: 0, syncedToCloud: false };
+    }
+    if (buyer.gold < price) {
+      throw new Error('Not enough Gold to buy this magazine.');
+    }
+    const newBuyerGold = buyer.gold - price;
+    playerMap[buyerId] = {
+      ...buyer,
+      gold: newBuyerGold,
+      ownedMagazineIds: sanitizeMagazineIds([...(buyer.ownedMagazineIds || []), magazine.id]),
+      updatedAtMs: Date.now(),
+    };
+    const author = playerMap[magazine.authorId];
+    if (author && magazine.authorId !== buyerId && price > 0) {
+      playerMap[magazine.authorId] = {
+        ...author,
+        gold: Math.min(9999999, author.gold + price),
+        totalSales: (author.totalSales || 0) + price,
+        lastSale: {
+          amount: price,
+          itemLabel: `Magazine: ${magazine.title}`.slice(0, 40),
+          buyerName: sanitizeName(buyerName, 20),
+          at: Date.now(),
+        },
+        updatedAtMs: Date.now(),
+      };
+    }
+    writeJsonRecord(LOCAL_PLAYERS_KEY, playerMap);
+    notifyTopic('players');
+
+    saveLocalMagazine({ ...magazine, salesCount: (magazine.salesCount || 0) + 1 });
+    return { newBuyerGold, pricePaid: price, syncedToCloud: false };
+  };
+
+  if (!db) {
+    return executeLocal();
+  }
+
+  try {
+    const activeDb = db;
+    const magRef = doc(activeDb, 'magazines', magazine.id);
+    const buyerRef = doc(activeDb, 'players', buyerId);
+    const authorRef = doc(activeDb, 'players', magazine.authorId);
+
+    const res = await withTimeout(
+      runTransaction(activeDb, async (tx) => {
+        const magSnap = await tx.get(magRef);
+        const curMag = magSnap.exists()
+          ? sanitizeCloudMagazine({ ...(magSnap.data() as Record<string, unknown>), id: magazine.id }) || magazine
+          : magazine;
+        const actualPrice = Math.max(0, Math.round(curMag.price || 0));
+
+        const buyerSnap = await tx.get(buyerRef);
+        if (!buyerSnap.exists()) {
+          throw new Error('Buyer profile not synced yet.');
+        }
+        const buyerData = buyerSnap.data() as CloudPlayerProfile;
+        const ownedIds = sanitizeMagazineIds(buyerData.ownedMagazineIds);
+        if (curMag.authorId === buyerId || ownedIds.includes(curMag.id)) {
+          return { newBuyerGold: buyerData.gold, pricePaid: 0, syncedToCloud: true };
+        }
+        if (buyerData.gold < actualPrice) {
+          throw new Error('Not enough Gold to buy this magazine.');
+        }
+
+        const authorSnap = curMag.authorId !== buyerId ? await tx.get(authorRef) : null;
+        const newBuyerGold = buyerData.gold - actualPrice;
+
+        tx.update(buyerRef, {
+          gold: newBuyerGold,
+          ownedMagazineIds: sanitizeMagazineIds([...ownedIds, curMag.id]),
+          updatedAt: serverTimestamp(),
+        });
+
+        if (authorSnap?.exists() && curMag.authorId !== buyerId && actualPrice > 0) {
+          const authorData = authorSnap.data() as CloudPlayerProfile;
+          tx.update(authorRef, {
+            gold: Math.min(9999999, authorData.gold + actualPrice),
+            totalSales: (authorData.totalSales || 0) + actualPrice,
+            lastSale: {
+              amount: actualPrice,
+              itemLabel: `Magazine: ${curMag.title}`.slice(0, 40),
+              buyerName: sanitizeName(buyerName, 20),
+              at: Date.now(),
+            },
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        if (magSnap.exists()) {
+          tx.update(magRef, {
+            salesCount: (curMag.salesCount || 0) + 1,
+          });
+        }
+
+        return { newBuyerGold, pricePaid: actualPrice, syncedToCloud: true };
+      }),
+      4500,
+      'purchaseMagazine'
+    );
+
+    saveLocalMagazine({ ...magazine, salesCount: (magazine.salesCount || 0) + (res.pricePaid > 0 ? 1 : 0) });
+    setCloudHealthy(true);
+    return res;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Not enough Gold')) {
+      throw error;
+    }
+    logCloudFallbackError('purchaseMagazine', OperationType.WRITE, `magazines/${magazine.id}`, error);
+    return executeLocal();
+  }
+}
+
+export async function likeMagazine(magazine: CloudMagazine): Promise<void> {
+  const nextLikes = (magazine.likesCount || 0) + 1;
+  saveLocalMagazine({ ...magazine, likesCount: nextLikes });
+  if (!db) return;
+  try {
+    const magRef = doc(db, 'magazines', magazine.id);
+    await withTimeout(
+      runTransaction(db, async (tx) => {
+        const snap = await tx.get(magRef);
+        if (!snap.exists()) return;
+        const cur = snap.data() as Partial<CloudMagazine>;
+        tx.update(magRef, {
+          likesCount: Math.max(0, Math.floor(Number(cur.likesCount) || 0)) + 1,
+        });
+      }),
+      3500,
+      'likeMagazine'
+    );
+    setCloudHealthy(true);
+  } catch (error) {
+    logCloudFallbackError('likeMagazine', OperationType.UPDATE, `magazines/${magazine.id}`, error);
+  }
+}
+
 

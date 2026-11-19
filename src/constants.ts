@@ -1,6 +1,95 @@
 export type ClothingSlot = 'hat' | 'top' | 'bottom' | 'dress' | 'shoes';
 export type ClothingSource = 'starter' | 'custom' | 'luxury' | 'boutique';
 export type EditionTier = 'unique' | 'limited' | 'standard';
+export type OutfitEffectType =
+  | 'glowing_pearls'
+  | 'starlight_coral'
+  | 'seafoam_essence'
+  | 'sunset_amber';
+
+export interface OutfitEffectMeta {
+  id: OutfitEffectType;
+  label: string;
+  shortLabel: string;
+  ingredientName: string;
+  description: string;
+  accentHex: string;
+  badgeBg: string;
+  badgeText: string;
+  badgeBorder: string;
+}
+
+export const VALID_OUTFIT_EFFECTS: OutfitEffectType[] = [
+  'glowing_pearls',
+  'starlight_coral',
+  'seafoam_essence',
+  'sunset_amber',
+];
+
+export const OUTFIT_EFFECTS: OutfitEffectMeta[] = [
+  {
+    id: 'glowing_pearls',
+    label: 'Glowing Pearls',
+    shortLabel: 'Night Glow',
+    ingredientName: 'Glowing Pearl',
+    description: 'Selected pixels shimmer & glow softly in the night air.',
+    accentHex: '#a5f3fc',
+    badgeBg: '#ecfeff',
+    badgeText: '#0e7490',
+    badgeBorder: '#06b6d4',
+  },
+  {
+    id: 'starlight_coral',
+    label: 'Starlight Coral',
+    shortLabel: 'Star Trail',
+    ingredientName: 'Starlight Coral',
+    description: 'Emits trailing pixel stars & sparkles as you walk.',
+    accentHex: '#fde047',
+    badgeBg: '#fefce8',
+    badgeText: '#a16207',
+    badgeBorder: '#eab308',
+  },
+  {
+    id: 'seafoam_essence',
+    label: 'Seafoam Essence',
+    shortLabel: 'Bubbles',
+    ingredientName: 'Seafoam Essence',
+    description: 'Emits buoyant floating seafoam water bubbles around you.',
+    accentHex: '#5eead4',
+    badgeBg: '#f0fdfa',
+    badgeText: '#0f766e',
+    badgeBorder: '#14b8a6',
+  },
+  {
+    id: 'sunset_amber',
+    label: 'Sunset Amber',
+    shortLabel: 'Silk Shift',
+    ingredientName: 'Sunset Amber',
+    description: 'Creates a warm animated sunset color-shift gradient on fabric.',
+    accentHex: '#fb923c',
+    badgeBg: '#fff7ed',
+    badgeText: '#c2410c',
+    badgeBorder: '#f97316',
+  },
+];
+
+export function getOutfitEffectMeta(effect?: OutfitEffectType | null): OutfitEffectMeta | null {
+  if (!effect) return null;
+  return OUTFIT_EFFECTS.find((e) => e.id === effect) || null;
+}
+
+export function normalizeShimmerPixels(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  let out = '';
+  let anyOne = false;
+  for (let i = 0; i < 256; i++) {
+    const ch = raw[i] === '1' ? '1' : '0';
+    if (ch === '1') anyOne = true;
+    out += ch;
+  }
+  return anyOne ? out : undefined;
+}
+
 export type PetKind =
   | 'calico'
   | 'tabby'
@@ -38,6 +127,95 @@ export interface GearStats {
   seaRes: number;
 }
 
+export type RainReactiveStyle = 'umbrella' | 'hood';
+
+export interface ReactiveOutfitConfig {
+  nightNeon?: {
+    pixels: string; // 256 chars ('1'/'0') marking pixels that switch to neon glow at night
+    color: string; // Hex neon/bioluminescent color
+  } | null;
+  rainMode?: RainReactiveStyle | null;
+  rainColor?: string | null; // Matching umbrella or rain-hood hex color
+}
+
+export const REACTIVE_NEON_PRESETS: Array<{ label: string; hex: string }> = [
+  { label: 'Bio Cyan', hex: '#00f5d4' },
+  { label: 'Neon Pink', hex: '#ff2a85' },
+  { label: 'Glow Lime', hex: '#bef264' },
+  { label: 'Ultraviolet', hex: '#c084fc' },
+  { label: 'Star Gold', hex: '#fde047' },
+  { label: 'Coral Pulse', hex: '#fb7185' },
+];
+
+export function sanitizeHexColor(raw: unknown, fallback = '#00f5d4'): string {
+  if (typeof raw === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw.trim())) {
+    return raw.trim().toLowerCase();
+  }
+  return fallback;
+}
+
+export function sanitizeReactiveConfig(raw: unknown): ReactiveOutfitConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const rec = raw as Record<string, unknown>;
+  const out: ReactiveOutfitConfig = {};
+
+  if (rec.nightNeon && typeof rec.nightNeon === 'object') {
+    const nn = rec.nightNeon as Record<string, unknown>;
+    const cleanPx = normalizeShimmerPixels(nn.pixels);
+    if (cleanPx) {
+      out.nightNeon = {
+        pixels: cleanPx,
+        color: sanitizeHexColor(nn.color, '#00f5d4'),
+      };
+    }
+  }
+
+  if (rec.rainMode === 'umbrella' || rec.rainMode === 'hood') {
+    out.rainMode = rec.rainMode;
+    out.rainColor = sanitizeHexColor(rec.rainColor, '#3ca3b8');
+  }
+
+  return out.nightNeon || out.rainMode ? out : undefined;
+}
+
+export function getReactiveBadges(reactive?: ReactiveOutfitConfig | null): Array<{
+  key: string;
+  label: string;
+  bg: string;
+  text: string;
+  border: string;
+}> {
+  if (!reactive) return [];
+  const badges: Array<{ key: string; label: string; bg: string; text: string; border: string }> = [];
+  if (reactive.nightNeon) {
+    badges.push({
+      key: 'night_neon',
+      label: 'Night Neon',
+      bg: '#0f172a',
+      text: reactive.nightNeon.color || '#00f5d4',
+      border: reactive.nightNeon.color || '#00f5d4',
+    });
+  }
+  if (reactive.rainMode === 'umbrella') {
+    badges.push({
+      key: 'rain_umbrella',
+      label: 'Rain Umbrella',
+      bg: '#e0f2fe',
+      text: '#0369a1',
+      border: '#0284c7',
+    });
+  } else if (reactive.rainMode === 'hood') {
+    badges.push({
+      key: 'rain_hood',
+      label: 'Rain Hood',
+      bg: '#e0e7ff',
+      text: '#3730a3',
+      border: '#4f46e5',
+    });
+  }
+  return badges;
+}
+
 export interface ClothingItem {
   uid: string;
   name: string;
@@ -47,6 +225,9 @@ export interface ClothingItem {
   palette: string[];
   pixels: string; // 256 chars (16x16), '.' = transparent, PALETTE_CODES[idx] = hex color
   stats: GearStats;
+  effect?: OutfitEffectType | null;
+  shimmerPixels?: string; // optional 256 chars ('1'/'0') marking glowing pixels for glowing_pearls
+  reactive?: ReactiveOutfitConfig | null;
   editionId?: string;
   editionSerial?: number;
   editionTotal?: number;

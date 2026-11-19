@@ -4,6 +4,8 @@ import { renderClothingThumbnail, SLOT_LABELS } from './clothing';
 import { BOAT_CATALOG, doesItemMatchTrend, renderWatercraftSprite, type FashionTrend } from './community';
 import {
   formatEditionBadge,
+  getOutfitEffectMeta,
+  getReactiveBadges,
   getShopTierSpec,
   SHOP_TIER_CONFIGS,
   type BoatCatalogEntry,
@@ -363,6 +365,27 @@ export const RunwayAuctionModal: React.FC<{
                       {formatEditionBadge(activeAuction.item)}
                     </span>
                   )}
+                  {getOutfitEffectMeta(activeAuction.item.effect) && (
+                    <span
+                      className="border px-1.5 py-0.5 text-[10px] font-bold"
+                      style={{
+                        backgroundColor: getOutfitEffectMeta(activeAuction.item.effect)!.badgeBg,
+                        color: getOutfitEffectMeta(activeAuction.item.effect)!.badgeText,
+                        borderColor: getOutfitEffectMeta(activeAuction.item.effect)!.badgeBorder,
+                      }}
+                    >
+                      ✦ {getOutfitEffectMeta(activeAuction.item.effect)!.label}
+                    </span>
+                  )}
+                  {getReactiveBadges(activeAuction.item.reactive).map((rb) => (
+                    <span
+                      key={rb.label}
+                      className="border px-1.5 py-0.5 text-[10px] font-bold"
+                      style={{ backgroundColor: rb.bg, color: rb.text, borderColor: rb.border }}
+                    >
+                      {rb.label}
+                    </span>
+                  ))}
                   {doesItemMatchTrend(activeAuction.item, activeTrend) && (
                     <span className="border border-[#15803d] bg-[#dcfce7] px-1.5 py-0.5 text-[10px] font-bold text-[#15803d]">
                       TREND MATCH
@@ -478,11 +501,23 @@ export const RunwayAuctionModal: React.FC<{
                           <ModalItemThumb item={it} size={24} />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1">
+                          <div className="flex flex-wrap items-center gap-1">
                             <span dir="auto" className="truncate font-bold text-[#3d1e0b]">{it.name}</span>
                             {badge && (
                               <span className="shrink-0 bg-[#f3e8ff] px-1 text-[9px] font-bold text-[#6b21a8]">
                                 {badge}
+                              </span>
+                            )}
+                            {getOutfitEffectMeta(it.effect) && (
+                              <span
+                                className="shrink-0 border px-1 text-[9px] font-bold"
+                                style={{
+                                  backgroundColor: getOutfitEffectMeta(it.effect)!.badgeBg,
+                                  color: getOutfitEffectMeta(it.effect)!.badgeText,
+                                  borderColor: getOutfitEffectMeta(it.effect)!.badgeBorder,
+                                }}
+                              >
+                                ✦ {getOutfitEffectMeta(it.effect)!.label}
                               </span>
                             )}
                           </div>
@@ -693,7 +728,14 @@ export const BoatDockModal: React.FC<{
           })}
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t-2 border-[#c79963] pt-3">
+        <div className="mt-3 rounded-sm border-2 border-[#0e7490] bg-[#ecfeff] px-3 py-2 text-[11px] font-semibold text-[#155e75]">
+          <span className="font-bold">Deep-Sea Dye Hunting:</span> Sail into deep ocean waters to harvest{' '}
+          <span className="font-bold">Glowing Pearls</span>, <span className="font-bold">Starlight Coral</span>,{' '}
+          <span className="font-bold">Seafoam Essence</span>, &amp; <span className="font-bold">Sunset Amber</span>. Bring a companion pet aboard for a{' '}
+          <span className="font-bold">+1 Pet Dive Bonus</span>, then infuse them in the Fashion Studio!
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t-2 border-[#c79963] pt-3">
           <div className="text-xs font-semibold text-[#522b14]">
             {activeEntry
               ? `Active Craft: ${activeEntry.name} (${activeEntry.perkLabel})`
