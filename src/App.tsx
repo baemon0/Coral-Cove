@@ -37,6 +37,7 @@ import {
   Camera,
   Newspaper,
   BookOpen,
+  Settings,
 } from 'lucide-react';
 import {
   clampShopTier,
@@ -148,6 +149,21 @@ import {
   NewsstandModal,
   type LookbookSnapshot,
 } from './MagazineModals';
+import {
+  VIP_FASHION_THEMES,
+  VIP_REWARD_COUNTS,
+  VIP_VISIT_DURATION_MS,
+  drawBoatSkinOverlay,
+  drawPetAccessoryOverlay,
+  getVipEventState,
+  getVipReward,
+  renderLuxuryYachtSprite,
+  renderVipPropSprite,
+  renderVipStylistNpcSprite,
+  type VipJudgeResult,
+  type VipRewardDef,
+} from './vipStylist';
+import { VipCollectionCatalogModal, VipEventModal } from './VipStylistModals';
 import { OfflineIndicator, PWAInstallButton } from './PWAInstallControls';
 
 // ============================================================================
@@ -253,7 +269,9 @@ type PropKind =
   | 'rug_pink'
   | 'rug_teal'
   | 'rug_gold'
-  | 'newsstand_kiosk';
+  | 'newsstand_kiosk'
+  | 'vip_decor'
+  | 'vip_trophy';
 
 interface PropObject {
   id: string;
@@ -271,6 +289,7 @@ interface PropObject {
   fromCloud?: boolean;
   shopTier?: ShopTier;
   shopStructId?: string;
+  vipRewardId?: string | null;
   listing?: MannequinListing | null;
 }
 
@@ -292,6 +311,9 @@ interface RemotePlayerState {
   isBoating?: boolean;
   equippedBoat?: BoatKind | null;
   equippedPet?: PetKind | null;
+  vipTitle?: string | null;
+  petAccessory?: string | null;
+  boatSkin?: string | null;
   runwayShowAt?: number | null;
   petX: number;
   petY: number;
@@ -324,6 +346,8 @@ interface CharacterEntity {
   targetMannequinId?: string;
   isBoating?: boolean;
   equippedBoat?: BoatKind | null;
+  vipTitle?: string | null;
+  boatSkin?: string | null;
   chatText?: string | null;
   emoteEmoji?: string | null;
   isShowcasing?: boolean;
@@ -1338,6 +1362,9 @@ function getMannequinSprite(listing?: MannequinListing | null, sunsetPhase = 0):
 function getPropSprite(prop: PropObject, swayFrame = 0, sunsetPhase = 0): HTMLCanvasElement {
   if (prop.kind === 'mannequin') {
     return getMannequinSprite(prop.listing, sunsetPhase);
+  }
+  if (prop.kind === 'vip_decor' || prop.kind === 'vip_trophy') {
+    return renderVipPropSprite(prop.vipRewardId || 'vip_decor_01', swayFrame);
   }
 
   const harvested = prop.respawnTimer > 0;
@@ -3208,6 +3235,12 @@ interface SavedGameData {
   ownedPets?: PetKind[];
   equippedPet?: PetKind | null;
   ownedMagazineIds?: string[];
+  vipUnlockedIds?: string[];
+  vipDecorCounts?: Record<string, number>;
+  equippedVipTitle?: string | null;
+  equippedPetAccessory?: string | null;
+  equippedBoatSkin?: string | null;
+  vipWinsCount?: number;
   totalSales?: number;
   editionMintCounts?: Record<string, number>;
 }
@@ -3360,7 +3393,24 @@ export default function App() {
   const [lookbookOpen, setLookbookOpen] = useState<boolean>(false);
   const [cameraModeOpen, setCameraModeOpen] = useState<boolean>(false);
   const [cameraFlash, setCameraFlash] = useState<boolean>(false);
-  const [nearLandmarkPrompt, setNearLandmarkPrompt] = useState<'runway' | 'boat' | 'newsstand' | null>(null);
+  const [nearLandmarkPrompt, setNearLandmarkPrompt] = useState<'runway' | 'boat' | 'newsstand' | 'vip' | null>(null);
+  const [vipUnlockedIds, setVipUnlockedIds] = useState<string[]>(initialSave?.vipUnlockedIds || []);
+  const [vipDecorCounts, setVipDecorCounts] = useState<Record<string, number>>(initialSave?.vipDecorCounts || {});
+  const [equippedVipTitle, setEquippedVipTitle] = useState<string | null>(initialSave?.equippedVipTitle ?? null);
+  const [equippedPetAccessory, setEquippedPetAccessory] = useState<string | null>(initialSave?.equippedPetAccessory ?? null);
+  const [equippedBoatSkin, setEquippedBoatSkin] = useState<string | null>(initialSave?.equippedBoatSkin ?? null);
+  const [vipWinsCount, setVipWinsCount] = useState<number>(initialSave?.vipWinsCount || 0);
+  const [vipEventModalOpen, setVipEventModalOpen] = useState<boolean>(false);
+  const [vipCatalogModalOpen, setVipCatalogModalOpen] = useState<boolean>(false);
+  const [selectedVipPlaceId, setSelectedVipPlaceId] = useState<string | null>(null);
+  const [manualVipVisit, setManualVipVisit] = useState<{
+    activeUntilMs: number;
+    themeIndex: number;
+    visitId: string;
+  } | null>(null);
+  const [judgedVipVisitIds, setJudgedVipVisitIds] = useState<string[]>([]);
+  const [dismissedVipHintVisitId, setDismissedVipHintVisitId] = useState<string | null>(null);
+  const [hudMenuOpen, setHudMenuOpen] = useState<boolean>(false);
   const [manageShopId, setManageShopId] = useState<string | null>(null);
   const [nearOwnShopId, setNearOwnShopId] = useState<string | null>(null);
   const [movingShop, setMovingShop] = useState<{
@@ -3375,6 +3425,7 @@ export default function App() {
       kind: WorldStructureKind;
       relCol: number;
       relRow: number;
+      vipRewardId?: string | null;
       listing?: MannequinListing | null;
     }>;
   } | null>(null);
@@ -3545,6 +3596,37 @@ export default function App() {
   const equippedPetRef = useRef(equippedPet);
   const totalSalesRef = useRef(totalSales);
   const editionMintCountsRef = useRef(editionMintCounts);
+  const vipUnlockedIdsRef = useRef(vipUnlockedIds);
+  const vipDecorCountsRef = useRef(vipDecorCounts);
+  const equippedVipTitleRef = useRef(equippedVipTitle);
+  const equippedPetAccessoryRef = useRef(equippedPetAccessory);
+  const equippedBoatSkinRef = useRef(equippedBoatSkin);
+  const vipWinsCountRef = useRef(vipWinsCount);
+  const selectedVipPlaceIdRef = useRef(selectedVipPlaceId);
+  const manualVipVisitRef = useRef(manualVipVisit);
+  const vipNpcRef = useRef<{
+    x: number;
+    y: number;
+    dir: Direction;
+    animTime: number;
+    isMoving: boolean;
+    targetX: number;
+    targetY: number;
+    waitTimer: number;
+    speechTimer: number;
+    speechLangAr: boolean;
+  }>({
+    x: (BOAT_DOCK_COL + 1.5) * TILE_SIZE,
+    y: (BOAT_DOCK_ROW - 1) * TILE_SIZE,
+    dir: 'down',
+    animTime: 0,
+    isMoving: false,
+    targetX: PLAYER_SPAWN_COL * TILE_SIZE,
+    targetY: PLAYER_SPAWN_ROW * TILE_SIZE,
+    waitTimer: 1.5,
+    speechTimer: 0,
+    speechLangAr: false,
+  });
   const localPetHeartUntilRef = useRef<number>(0);
   const socialStateRef = useRef<{
     chatText: string | null;
@@ -3691,6 +3773,38 @@ export default function App() {
   }, [ownedMagazineIds]);
 
   useEffect(() => {
+    vipUnlockedIdsRef.current = vipUnlockedIds;
+  }, [vipUnlockedIds]);
+
+  useEffect(() => {
+    vipDecorCountsRef.current = vipDecorCounts;
+  }, [vipDecorCounts]);
+
+  useEffect(() => {
+    equippedVipTitleRef.current = equippedVipTitle;
+  }, [equippedVipTitle]);
+
+  useEffect(() => {
+    equippedPetAccessoryRef.current = equippedPetAccessory;
+  }, [equippedPetAccessory]);
+
+  useEffect(() => {
+    equippedBoatSkinRef.current = equippedBoatSkin;
+  }, [equippedBoatSkin]);
+
+  useEffect(() => {
+    vipWinsCountRef.current = vipWinsCount;
+  }, [vipWinsCount]);
+
+  useEffect(() => {
+    selectedVipPlaceIdRef.current = selectedVipPlaceId;
+  }, [selectedVipPlaceId]);
+
+  useEffect(() => {
+    manualVipVisitRef.current = manualVipVisit;
+  }, [manualVipVisit]);
+
+  useEffect(() => {
     modalOpenRef.current =
       !joinedIsland ||
       wardrobeOpen ||
@@ -3701,6 +3815,8 @@ export default function App() {
       boatModalOpen ||
       newsstandOpen ||
       lookbookOpen ||
+      vipEventModalOpen ||
+      vipCatalogModalOpen ||
       manageShopId !== null ||
       activeStallPropId !== null ||
       buyPreviewPropId !== null;
@@ -3720,6 +3836,8 @@ export default function App() {
     boatModalOpen,
     newsstandOpen,
     lookbookOpen,
+    vipEventModalOpen,
+    vipCatalogModalOpen,
     manageShopId,
     activeStallPropId,
     buyPreviewPropId,
@@ -3779,6 +3897,12 @@ export default function App() {
           ownedPets,
           equippedPet,
           ownedMagazineIds,
+          vipUnlockedIds,
+          vipDecorCounts,
+          equippedVipTitle,
+          equippedPetAccessory,
+          equippedBoatSkin,
+          vipWinsCount,
           totalSales,
           editionMintCounts,
         };
@@ -3805,6 +3929,12 @@ export default function App() {
             ownedPets,
             equippedPet,
             ownedMagazineIds,
+            vipUnlockedIds,
+            vipDecorCounts,
+            equippedVipTitle,
+            equippedPetAccessory,
+            equippedBoatSkin,
+            vipWinsCount,
             totalSales,
             editionMintCounts,
           },
@@ -3844,6 +3974,13 @@ export default function App() {
       equippedBoat,
       ownedPets,
       equippedPet,
+      ownedMagazineIds,
+      vipUnlockedIds,
+      vipDecorCounts,
+      equippedVipTitle,
+      equippedPetAccessory,
+      equippedBoatSkin,
+      vipWinsCount,
       totalSales,
       editionMintCounts,
     ]
@@ -4105,6 +4242,12 @@ export default function App() {
             ownedPets: ownedPetsRef.current,
             equippedPet: equippedPetRef.current,
             ownedMagazineIds: ownedMagazineIdsRef.current,
+            vipUnlockedIds: vipUnlockedIdsRef.current,
+            vipDecorCounts: vipDecorCountsRef.current,
+            equippedVipTitle: equippedVipTitleRef.current,
+            equippedPetAccessory: equippedPetAccessoryRef.current,
+            equippedBoatSkin: equippedBoatSkinRef.current,
+            vipWinsCount: vipWinsCountRef.current,
             totalSales: totalSalesRef.current,
             editionMintCounts: editionMintCountsRef.current,
           },
@@ -4127,6 +4270,9 @@ export default function App() {
           isBoating: isBoatingRef.current,
           equippedBoat: equippedBoatRef.current,
           equippedPet: equippedPetRef.current,
+          vipTitle: equippedVipTitleRef.current,
+          petAccessory: equippedPetAccessoryRef.current,
+          boatSkin: equippedBoatSkinRef.current,
           runwayShowAt: soc.runwayShowAt && nowMs - soc.runwayShowAt < 5000 ? soc.runwayShowAt : null,
         });
       }
@@ -4173,6 +4319,8 @@ export default function App() {
         cash_counter: 3,
         potted_plant: 3,
         lantern_post: 3,
+        vip_decor: 3,
+        vip_trophy: 3,
       };
       const sorted = [...structures].sort(
         (a, b) => (orderRank[a.kind] ?? 3) - (orderRank[b.kind] ?? 3)
@@ -4281,6 +4429,28 @@ export default function App() {
             ownerId: s.ownerId,
             fromCloud: true,
           });
+        } else if (s.kind === 'vip_decor' || s.kind === 'vip_trophy') {
+          const vReward = getVipReward(s.vipRewardId);
+          const isFlatVip =
+            vReward?.decorArchetype === 'carpet' ||
+            vReward?.decorArchetype === 'runway_tile' ||
+            vReward?.decorArchetype === 'mosaic_rug';
+          baseProps.push({
+            id: s.id,
+            kind: s.kind,
+            col: s.col,
+            row: s.row,
+            x: s.col * TILE_SIZE + 8,
+            y: s.row * TILE_SIZE + 12,
+            solid: !isFlatVip,
+            radius: isFlatVip ? 0 : 4.5,
+            variant: 0,
+            respawnTimer: 0,
+            owner: s.ownerName,
+            ownerId: s.ownerId,
+            fromCloud: true,
+            vipRewardId: s.vipRewardId || 'vip_decor_01',
+          });
         }
       }
 
@@ -4324,6 +4494,9 @@ export default function App() {
             isBoating: Boolean(op.isBoating),
             equippedBoat: op.equippedBoat ?? null,
             equippedPet: normPet,
+            vipTitle: op.vipTitle ?? null,
+            petAccessory: op.petAccessory ?? null,
+            boatSkin: op.boatSkin ?? null,
             runwayShowAt: op.runwayShowAt ?? null,
             petX: op.x - 14,
             petY: op.y + 4,
@@ -4350,6 +4523,9 @@ export default function App() {
           existing.isBoating = Boolean(op.isBoating);
           existing.equippedBoat = op.equippedBoat ?? null;
           existing.equippedPet = normPet;
+          existing.vipTitle = op.vipTitle ?? null;
+          existing.petAccessory = op.petAccessory ?? null;
+          existing.boatSkin = op.boatSkin ?? null;
           existing.runwayShowAt = op.runwayShowAt ?? null;
         }
       }
@@ -4477,6 +4653,12 @@ export default function App() {
       let activeTotalSales = totalSalesRef.current;
       let activeMintCounts = editionMintCountsRef.current;
       let activeOwnedMagazines = ownedMagazineIdsRef.current;
+      let activeVipUnlocked = vipUnlockedIdsRef.current;
+      let activeVipDecorCounts = vipDecorCountsRef.current;
+      let activeVipTitle = equippedVipTitleRef.current;
+      let activePetAcc = equippedPetAccessoryRef.current;
+      let activeBoatSkin = equippedBoatSkinRef.current;
+      let activeVipWins = vipWinsCountRef.current;
 
       if (existing) {
         activeAppearance = existing.appearance as CharacterAppearance;
@@ -4504,6 +4686,12 @@ export default function App() {
         activeTotalSales = existing.totalSales || 0;
         activeMintCounts = existing.editionMintCounts || {};
         activeOwnedMagazines = Array.isArray(existing.ownedMagazineIds) ? existing.ownedMagazineIds : [];
+        activeVipUnlocked = Array.isArray(existing.vipUnlockedIds) ? existing.vipUnlockedIds : [];
+        activeVipDecorCounts = existing.vipDecorCounts || {};
+        activeVipTitle = existing.equippedVipTitle ?? null;
+        activePetAcc = existing.equippedPetAccessory ?? null;
+        activeBoatSkin = existing.equippedBoatSkin ?? null;
+        activeVipWins = existing.vipWinsCount || 0;
         lastSeenSaleAtRef.current = existing.lastSale?.at || 0;
 
         setAppearance(activeAppearance);
@@ -4517,6 +4705,12 @@ export default function App() {
         setTotalSales(activeTotalSales);
         setEditionMintCounts(activeMintCounts);
         setOwnedMagazineIds(activeOwnedMagazines);
+        setVipUnlockedIds(activeVipUnlocked);
+        setVipDecorCounts(activeVipDecorCounts);
+        setEquippedVipTitle(activeVipTitle);
+        setEquippedPetAccessory(activePetAcc);
+        setEquippedBoatSkin(activeBoatSkin);
+        setVipWinsCount(activeVipWins);
 
         playerRef.current.x = Math.max(16, Math.min(WORLD_W - 16, existing.x));
         playerRef.current.y = Math.max(16, Math.min(WORLD_H - 16, existing.y));
@@ -4544,6 +4738,12 @@ export default function App() {
               ownedPets: activeOwnedPets,
               equippedPet: activeEquippedPet,
               ownedMagazineIds: activeOwnedMagazines,
+              vipUnlockedIds: activeVipUnlocked,
+              vipDecorCounts: activeVipDecorCounts,
+              equippedVipTitle: activeVipTitle,
+              equippedPetAccessory: activePetAcc,
+              equippedBoatSkin: activeBoatSkin,
+              vipWinsCount: activeVipWins,
               totalSales: activeTotalSales,
               editionMintCounts: activeMintCounts,
             },
@@ -4568,6 +4768,12 @@ export default function App() {
             ownedPets: activeOwnedPets,
             equippedPet: activeEquippedPet,
             ownedMagazineIds: activeOwnedMagazines,
+            vipUnlockedIds: activeVipUnlocked,
+            vipDecorCounts: activeVipDecorCounts,
+            equippedVipTitle: activeVipTitle,
+            equippedPetAccessory: activePetAcc,
+            equippedBoatSkin: activeBoatSkin,
+            vipWinsCount: activeVipWins,
             totalSales: activeTotalSales,
             editionMintCounts: activeMintCounts,
           },
@@ -4590,6 +4796,9 @@ export default function App() {
         isBoating: false,
         equippedBoat: activeEquippedBoat,
         equippedPet: activeEquippedPet,
+        vipTitle: activeVipTitle,
+        petAccessory: activePetAcc,
+        boatSkin: activeBoatSkin,
       });
     } catch {
       setPlayerName(cleanName);
@@ -4702,7 +4911,14 @@ export default function App() {
     (shopProp: PropObject): PropObject[] => {
       const spec = getShopTierSpec(shopProp.shopTier);
       return worldRef.current.props.filter((pr) => {
-        if (pr.kind !== 'mannequin' && !isDecorKind(pr.kind)) return false;
+        if (
+          pr.kind !== 'mannequin' &&
+          !isDecorKind(pr.kind) &&
+          pr.kind !== 'vip_decor' &&
+          pr.kind !== 'vip_trophy'
+        ) {
+          return false;
+        }
         const owned = pr.ownerId ? pr.ownerId === playerId : pr.owner === 'player';
         if (!owned) return false;
         return (
@@ -4876,6 +5092,7 @@ export default function App() {
         kind: pr.kind as WorldStructureKind,
         relCol: pr.col - shopProp.col,
         relRow: pr.row - shopProp.row,
+        vipRewardId: pr.vipRewardId ?? null,
         listing: pr.listing ?? null,
       }));
       setManageShopId(null);
@@ -5048,6 +5265,7 @@ export default function App() {
         ownerId: string;
         ownerName: string;
         tier?: ShopTier;
+        vipRewardId?: string | null;
         listing?: CloudListing | null;
       }> = [
         {
@@ -5079,6 +5297,7 @@ export default function App() {
           row: newRow,
           ownerId: playerId,
           ownerName: ownerDisplay,
+          vipRewardId: item.vipRewardId ?? null,
           listing: item.listing ?? null,
         });
       }
@@ -5253,6 +5472,111 @@ export default function App() {
         sfx.playClick();
         setNewsstandOpen(true);
         return;
+      }
+
+      // 1e. VIP Mystery Stylist NPC (Madame Lumière) & Docked Luxury Yacht interaction
+      const vipEventNow = getVipEventState(Date.now(), manualVipVisitRef.current);
+      if (vipEventNow.isDocked) {
+        const vNpc = vipNpcRef.current;
+        const clickedVipNpc =
+          targetCol !== undefined &&
+          Math.hypot(vNpc.x - tileCenterX, vNpc.y - tileCenterY) <= TILE_SIZE * 2.2 &&
+          Math.hypot(vNpc.x - p.x, vNpc.y - p.y) <= TILE_SIZE * 14;
+        const nearVipNpc = Math.hypot(vNpc.x - p.x, vNpc.y - p.y) <= TILE_SIZE * 3.4;
+        const yachtCenterX = (coastColAt(BOAT_DOCK_ROW) + 6.5) * TILE_SIZE;
+        const yachtCenterY = (BOAT_DOCK_ROW - 2.6) * TILE_SIZE;
+        const clickedVipYacht =
+          targetCol !== undefined &&
+          Math.hypot(yachtCenterX - tileCenterX, yachtCenterY - tileCenterY) <= TILE_SIZE * 4.2 &&
+          Math.hypot(yachtCenterX - p.x, yachtCenterY - p.y) <= TILE_SIZE * 8.5;
+        if (clickedVipNpc || clickedVipYacht || (targetCol === undefined && nearVipNpc)) {
+          sfx.playChime();
+          setVipEventModalOpen(true);
+          return;
+        }
+      }
+
+      // 1f. Placing an Exclusive VIP Decor or Golden Trophy Reward
+      const activeVipId = selectedVipPlaceIdRef.current;
+      if (activeVipId && (vipDecorCountsRef.current[activeVipId] || 0) > 0) {
+        const vipReward = getVipReward(activeVipId);
+        if (vipReward && (vipReward.subkind === 'shop_decor' || vipReward.subkind === 'golden_trophy')) {
+          const isFlatVip =
+            vipReward.decorArchetype === 'carpet' ||
+            vipReward.decorArchetype === 'runway_tile' ||
+            vipReward.decorArchetype === 'mosaic_rug';
+          const tileT = tiles[row]?.[col];
+          const validFloor =
+            tileT === TileType.GRASS ||
+            tileT === TileType.GRASS_FLOWER ||
+            tileT === TileType.DIRT_PATH ||
+            tileT === TileType.SAND ||
+            tileT === TileType.DOCK ||
+            tileT === TileType.BOUTIQUE_FLOOR;
+          const blocked =
+            !validFloor ||
+            isLandmarkTile(col, row) ||
+            props.some((pr) => {
+              if (pr.respawnTimer > 0 && pr.kind !== 'palm') return false;
+              if (pr.kind === 'boutique_backwall') {
+                return row === pr.row && col >= pr.col && col < pr.col + getShopTierSpec(pr.shopTier).cols;
+              }
+              if (isFlatVip && !pr.solid) return pr.col === col && pr.row === row;
+              if (!isFlatVip && pr.solid) return pr.col === col && pr.row === row;
+              return false;
+            });
+
+          if (!blocked) {
+            p.swingTimer = 0.22;
+            p.swingDir = p.dir;
+            const kind: 'vip_decor' | 'vip_trophy' =
+              vipReward.subkind === 'golden_trophy' ? 'vip_trophy' : 'vip_decor';
+            const structId = `${kind}_${activeVipId}_${col}_${row}_${Date.now().toString(36)}`;
+            props.push({
+              id: structId,
+              kind,
+              col,
+              row,
+              x: tileCenterX,
+              y: row * TILE_SIZE + 12,
+              solid: !isFlatVip,
+              radius: isFlatVip ? 0 : 4.5,
+              variant: 0,
+              respawnTimer: 0,
+              owner: playerNameRef.current,
+              ownerId: playerId,
+              fromCloud: true,
+              vipRewardId: activeVipId,
+            });
+            const remainingVip = Math.max(0, (vipDecorCountsRef.current[activeVipId] || 0) - 1);
+            setVipDecorCounts((prev) => ({
+              ...prev,
+              [activeVipId]: Math.max(0, (prev[activeVipId] || 0) - 1),
+            }));
+            if (remainingVip <= 0) {
+              setSelectedVipPlaceId(null);
+            }
+            setPropsVersion((v) => v + 1);
+            sfx.playChime();
+            spawnParticles(tileCenterX, tileCenterY, vipReward.colors[0] || '#fde047', 14);
+            spawnFloatingText(tileCenterX, tileCenterY - 14, `★ ${vipReward.name}!`, '#fde047');
+            void createWorldStructure({
+              id: structId,
+              kind,
+              col,
+              row,
+              ownerId: playerId,
+              ownerName: playerNameRef.current,
+              vipRewardId: activeVipId,
+              listing: null,
+            });
+            return;
+          } else {
+            sfx.playClick();
+            spawnFloatingText(tileCenterX, tileCenterY - 12, 'Choose a clear shop or island tile!', '#fda4af');
+            return;
+          }
+        }
       }
 
       // 2. Building Placement when buildable item is selected
@@ -5461,6 +5785,8 @@ export default function App() {
         k === 'boutique_pillar_r' ||
         k === 'display_table' ||
         k === 'mannequin' ||
+        k === 'vip_decor' ||
+        k === 'vip_trophy' ||
         isDecorKind(k);
 
       const targetProp =
@@ -5740,6 +6066,7 @@ export default function App() {
     [
       confirmShopRelocation,
       getShopStructId,
+      isLandmarkTile,
       isPositionWalkable,
       openMannequinModal,
       playerId,
@@ -5927,8 +6254,126 @@ export default function App() {
       equippedBoat: equippedBoatRef.current,
       equippedPet: equippedPetRef.current,
       runwayShowAt: soc.runwayShowAt && nowMs - soc.runwayShowAt < 5000 ? soc.runwayShowAt : null,
+      vipTitle: equippedVipTitleRef.current,
+      petAccessory: equippedPetAccessoryRef.current,
+      boatSkin: equippedBoatSkinRef.current,
     });
   }, [playerId]);
+
+  const handleSummonVipYacht = useCallback(() => {
+    const curState = getVipEventState(Date.now(), manualVipVisitRef.current);
+    const nextIdx = (curState.themeIndex + 1) % VIP_FASHION_THEMES.length;
+    const visitId = `vip_manual_${Date.now().toString(36)}`;
+    const nextVisit = {
+      activeUntilMs: Date.now() + VIP_VISIT_DURATION_MS,
+      themeIndex: nextIdx,
+      visitId,
+    };
+    manualVipVisitRef.current = nextVisit;
+    setManualVipVisit(nextVisit);
+    vipNpcRef.current.x = (BOAT_DOCK_COL + 1.5) * TILE_SIZE;
+    vipNpcRef.current.y = (BOAT_DOCK_ROW - 1) * TILE_SIZE;
+    vipNpcRef.current.dir = 'down';
+    vipNpcRef.current.waitTimer = 1.2;
+    vipNpcRef.current.speechTimer = 0;
+    sfx.playChime();
+    spawnParticles(playerRef.current.x, playerRef.current.y - 10, '#fde047', 18);
+    spawnFloatingText(
+      playerRef.current.x,
+      playerRef.current.y - 26,
+      'VIP Luxury Yacht Docked! ✨',
+      '#fde047'
+    );
+  }, [spawnFloatingText, spawnParticles]);
+
+  const handleClaimVipJudgeResult = useCallback(
+    (visitId: string, result: VipJudgeResult) => {
+      setJudgedVipVisitIds((prev) => (prev.includes(visitId) ? prev : [...prev, visitId]));
+      setGold((g) => g + result.bonusGold);
+      setVipWinsCount((w) => w + 1);
+      setVipUnlockedIds((prev) => {
+        const next = new Set(prev);
+        for (const r of result.rewards) next.add(r.id);
+        return Array.from(next);
+      });
+      setVipDecorCounts((prev) => {
+        const next = { ...prev };
+        for (const r of result.rewards) {
+          if (r.subkind === 'shop_decor' || r.subkind === 'golden_trophy') {
+            next[r.id] = (next[r.id] || 0) + 1;
+          }
+        }
+        return next;
+      });
+      sfx.playCoin();
+      spawnParticles(playerRef.current.x, playerRef.current.y - 10, '#fde047', 24);
+      spawnFloatingText(
+        playerRef.current.x,
+        playerRef.current.y - 28,
+        `★ VIP +${result.rewards.length} Exclusive Drops & +${result.bonusGold}G!`,
+        '#fde047'
+      );
+    },
+    [spawnFloatingText, spawnParticles]
+  );
+
+  const handleStartPlaceVipReward = useCallback(
+    (rewardId: string) => {
+      const reward = getVipReward(rewardId);
+      if (!reward) return;
+      if ((vipDecorCountsRef.current[rewardId] || 0) <= 0) return;
+      sfx.playClick();
+      setSelectedDecorKind(null);
+      setSelectedVipPlaceId(rewardId);
+      setVipEventModalOpen(false);
+      setVipCatalogModalOpen(false);
+      spawnFloatingText(
+        playerRef.current.x,
+        playerRef.current.y - 24,
+        `Click shop/island to place ${reward.name}!`,
+        '#fde047'
+      );
+    },
+    [spawnFloatingText]
+  );
+
+  const handleEquipVipReward = useCallback(
+    (reward: VipRewardDef) => {
+      sfx.playChime();
+      if (reward.subkind === 'prestige_title') {
+        equippedVipTitleRef.current = reward.id;
+        setEquippedVipTitle(reward.id);
+      } else if (reward.subkind === 'pet_accessory') {
+        equippedPetAccessoryRef.current = reward.id;
+        setEquippedPetAccessory(reward.id);
+      } else if (reward.subkind === 'boat_skin') {
+        equippedBoatSkinRef.current = reward.id;
+        setEquippedBoatSkin(reward.id);
+      }
+      spawnParticles(playerRef.current.x, playerRef.current.y - 8, reward.colors[0] || '#fde047', 12);
+      spawnFloatingText(playerRef.current.x, playerRef.current.y - 24, `Equipped ${reward.name}!`, '#fde047');
+      setTimeout(() => sendPresenceNow(), 60);
+    },
+    [sendPresenceNow, spawnFloatingText, spawnParticles]
+  );
+
+  const handleUnequipVipKind = useCallback(
+    (kind: 'title' | 'pet_accessory' | 'boat_skin') => {
+      sfx.playClick();
+      if (kind === 'title') {
+        equippedVipTitleRef.current = null;
+        setEquippedVipTitle(null);
+      } else if (kind === 'pet_accessory') {
+        equippedPetAccessoryRef.current = null;
+        setEquippedPetAccessory(null);
+      } else {
+        equippedBoatSkinRef.current = null;
+        setEquippedBoatSkin(null);
+      }
+      setTimeout(() => sendPresenceNow(), 60);
+    },
+    [sendPresenceNow]
+  );
 
   const handleSendChat = useCallback(
     (e?: React.FormEvent) => {
@@ -5938,12 +6383,16 @@ export default function App() {
       setChatBarOpen(false);
       chatInputRef.current?.blur();
       if (!clean) return;
+      if (clean.toLowerCase() === '/vip') {
+        handleSummonVipYacht();
+        return;
+      }
       sfx.playClick();
       socialStateRef.current.chatText = clean;
       socialStateRef.current.chatAt = Date.now();
       sendPresenceNow();
     },
-    [chatDraft, sendPresenceNow]
+    [chatDraft, handleSummonVipYacht, sendPresenceNow]
   );
 
   const handleSendEmote = useCallback(
@@ -6327,6 +6776,8 @@ export default function App() {
           setShopsModalOpen(false);
           setRunwayModalOpen(false);
           setBoatModalOpen(false);
+          setVipEventModalOpen(false);
+          setVipCatalogModalOpen(false);
           setActiveStallPropId(null);
           setBuyPreviewPropId(null);
           setChatBarOpen(false);
@@ -6372,7 +6823,12 @@ export default function App() {
 
       if (
         e.key === 'Escape' &&
-        (modalOpenRef.current || chatBarOpen || cameraModeOpen || movingShopRef.current || selectedDecorKindRef.current)
+        (modalOpenRef.current ||
+          chatBarOpen ||
+          cameraModeOpen ||
+          movingShopRef.current ||
+          selectedDecorKindRef.current ||
+          selectedVipPlaceIdRef.current)
       ) {
         sfx.playClick();
         setWardrobeOpen(false);
@@ -6383,10 +6839,13 @@ export default function App() {
         setBoatModalOpen(false);
         setNewsstandOpen(false);
         setLookbookOpen(false);
+        setVipEventModalOpen(false);
+        setVipCatalogModalOpen(false);
         setCameraModeOpen(false);
         setManageShopId(null);
         setMovingShop(null);
         setSelectedDecorKind(null);
+        setSelectedVipPlaceId(null);
         setActiveStallPropId(null);
         setBuyPreviewPropId(null);
         setChatBarOpen(false);
@@ -6649,7 +7108,8 @@ export default function App() {
       name: string,
       screenX: number,
       screenY: number,
-      isPlayer: boolean
+      isPlayer: boolean,
+      vipTitleId?: string | null
     ) => {
       const isRtl = /[\u0600-\u06FF]/.test(name);
       ctx.save();
@@ -6675,6 +7135,29 @@ export default function App() {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(name, Math.round(screenX), by + boxH / 2 - 0.5);
+
+      // Optional VIP Prestige Title & Designer Badge Pill above name tag
+      if (vipTitleId) {
+        const titleDef = getVipReward(vipTitleId);
+        if (titleDef && titleDef.subkind === 'prestige_title' && titleDef.titleBadgeText) {
+          ctx.direction = 'ltr';
+          ctx.font = 'bold 9px "Plus Jakarta Sans", sans-serif';
+          const badgeTxt = titleDef.titleBadgeText;
+          const tw = Math.ceil(ctx.measureText(badgeTxt).width);
+          const tbW = tw + 10;
+          const tbH = 14;
+          const tbx = Math.round(screenX - tbW / 2);
+          const tby = by - tbH - 3;
+          ctx.fillStyle = titleDef.titleBorder || '#f59e0b';
+          ctx.fillRect(tbx - 1, tby - 1, tbW + 2, tbH + 2);
+          ctx.fillStyle = titleDef.titleBg || '#451a03';
+          ctx.fillRect(tbx, tby, tbW, tbH);
+          ctx.fillStyle = titleDef.titleText || '#fde047';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(badgeTxt, Math.round(screenX), tby + tbH / 2);
+        }
+      }
       ctx.restore();
     };
 
@@ -6880,19 +7363,90 @@ export default function App() {
         }
       }
 
-      // Contextual landmark & own-boutique proximity prompts
+      // Contextual landmark, VIP Stylist & own-boutique proximity prompts
+      const vipLoopEv = getVipEventState(Date.now(), manualVipVisitRef.current);
+      const vNpc = vipNpcRef.current;
+      if (vipLoopEv.isDocked) {
+        vNpc.speechTimer += dt;
+        if (vNpc.speechTimer >= 4.2) {
+          vNpc.speechTimer = 0;
+          vNpc.speechLangAr = !vNpc.speechLangAr;
+        }
+        if (vNpc.waitTimer > 0) {
+          vNpc.waitTimer -= dt;
+          vNpc.isMoving = false;
+          if (vNpc.waitTimer <= 0) {
+            const shopStops: Array<{ x: number; y: number }> = [
+              { x: (LINA_BOUTIQUE_COL + 2) * TILE_SIZE, y: (LINA_BOUTIQUE_ROW + 3.2) * TILE_SIZE },
+              { x: (SARA_BOUTIQUE_COL + 2) * TILE_SIZE, y: (SARA_BOUTIQUE_ROW + 3.2) * TILE_SIZE },
+              { x: (BOAT_DOCK_COL + 1.5) * TILE_SIZE, y: (BOAT_DOCK_ROW - 1) * TILE_SIZE },
+              { x: RUNWAY_PODIUM_X, y: (RUNWAY_STAGE_ROW + 4.2) * TILE_SIZE },
+            ];
+            for (const sh of worldRef.current.props) {
+              if (sh.kind === 'boutique_backwall') {
+                const sp = getShopTierSpec(sh.shopTier);
+                shopStops.push({
+                  x: (sh.col + sp.cols / 2) * TILE_SIZE,
+                  y: (sh.row + sp.rows + 0.3) * TILE_SIZE,
+                });
+              }
+            }
+            const pick = shopStops[Math.floor(Math.random() * shopStops.length)];
+            vNpc.targetX = pick.x;
+            vNpc.targetY = pick.y;
+          }
+        } else {
+          const vdx = vNpc.targetX - vNpc.x;
+          const vdy = vNpc.targetY - vNpc.y;
+          const vdist = Math.hypot(vdx, vdy);
+          if (vdist < 5) {
+            vNpc.isMoving = false;
+            vNpc.dir = 'down';
+            vNpc.waitTimer = 3.6;
+          } else {
+            const vStep = Math.min(vdist, 42 * dt);
+            const nx = vNpc.x + (vdx / vdist) * vStep;
+            const ny = vNpc.y + (vdy / vdist) * vStep;
+            if (isPositionWalkable(nx, ny)) {
+              vNpc.x = nx;
+              vNpc.y = ny;
+              vNpc.isMoving = true;
+              vNpc.animTime += dt * 7;
+              vNpc.dir =
+                Math.abs(vdx) > Math.abs(vdy)
+                  ? vdx > 0
+                    ? 'right'
+                    : 'left'
+                  : vdy > 0
+                    ? 'down'
+                    : 'up';
+            } else {
+              // Gentle direct glide around obstacles so Madame Lumière never gets stuck visiting shops
+              vNpc.x = nx;
+              vNpc.y = ny;
+              vNpc.isMoving = true;
+              vNpc.animTime += dt * 7;
+            }
+          }
+        }
+      }
+
+      const nearVipNpc =
+        vipLoopEv.isDocked && Math.hypot(p.x - vNpc.x, p.y - vNpc.y) <= TILE_SIZE * 3.4;
       const nearRunway = Math.hypot(p.x - RUNWAY_PODIUM_X, p.y - RUNWAY_PODIUM_Y) <= TILE_SIZE * 4.5;
       const boatCenterX = (BOAT_DOCK_COL + 2.5) * TILE_SIZE;
       const boatCenterY = (BOAT_DOCK_ROW + 0.5) * TILE_SIZE;
       const nearBoat = Math.hypot(p.x - boatCenterX, p.y - boatCenterY) <= TILE_SIZE * 3.8;
       const nearNewsstand = Math.hypot(p.x - NEWSSTAND_CENTER_X, p.y - NEWSSTAND_CENTER_Y) <= TILE_SIZE * 3.8;
-      const nextPrompt: 'runway' | 'boat' | 'newsstand' | null = nearRunway
-        ? 'runway'
-        : nearNewsstand
-          ? 'newsstand'
-          : nearBoat
-            ? 'boat'
-            : null;
+      const nextPrompt: 'runway' | 'boat' | 'newsstand' | 'vip' | null = nearVipNpc
+        ? 'vip'
+        : nearRunway
+          ? 'runway'
+          : nearNewsstand
+            ? 'newsstand'
+            : nearBoat
+              ? 'boat'
+              : null;
       setNearLandmarkPrompt((prev) => (prev === nextPrompt ? prev : nextPrompt));
 
       const pColTile = p.x / TILE_SIZE;
@@ -7057,6 +7611,9 @@ export default function App() {
             equippedBoat: equippedBoatRef.current,
             equippedPet: equippedPetRef.current,
             runwayShowAt: soc.runwayShowAt || null,
+            vipTitle: equippedVipTitleRef.current,
+            petAccessory: equippedPetAccessoryRef.current,
+            boatSkin: equippedBoatSkinRef.current,
           });
         } else {
           ps.wasMoving = p.isMoving;
@@ -7395,6 +7952,44 @@ export default function App() {
               mooredBoat.width * PIXEL_SCALE,
               mooredBoat.height * PIXEL_SCALE
             );
+            if (equippedBoatSkinRef.current) {
+              drawBoatSkinOverlay(
+                ctx,
+                equippedBoatSkinRef.current,
+                mbX,
+                mbY,
+                mooredBoat.width * PIXEL_SCALE,
+                mooredBoat.height * PIXEL_SCALE,
+                PIXEL_SCALE,
+                globalTime
+              );
+            }
+          }
+
+          // Docked VIP Mystery Stylist Luxury Yacht at the Coral Pier
+          const vipRenderEv = getVipEventState(nowWall, manualVipVisitRef.current);
+          if (vipRenderEv.isDocked) {
+            const yachtNight =
+              timeOfDayModeRef.current === 'night' ||
+              (timeOfDayModeRef.current === 'auto' && -Math.cos(globalTime * 0.045) > 0.25);
+            const yachtSpr = renderLuxuryYachtSprite(Math.floor(globalTime * 2), yachtNight);
+            const yx = Math.round((coastColAt(BOAT_DOCK_ROW) + 3.5) * TILE_SIZE - camX) * PIXEL_SCALE;
+            const yy =
+              Math.round(
+                (BOAT_DOCK_ROW - 4.4) * TILE_SIZE - camY + Math.sin(globalTime * 1.9) * 1.4
+              ) * PIXEL_SCALE;
+            ctx.drawImage(
+              yachtSpr,
+              yx,
+              yy,
+              yachtSpr.width * PIXEL_SCALE,
+              yachtSpr.height * PIXEL_SCALE
+            );
+            const yLabelX = yx + (yachtSpr.width * PIXEL_SCALE) / 2;
+            const yLabelY = yy - 4;
+            if (yLabelX > -120 && yLabelX < viewCssW + 120 && yLabelY > -40 && yLabelY < viewCssH + 40) {
+              drawNameTag(ctx, '★ VIP Luxury Yacht · يخت VIP', yLabelX, yLabelY, true);
+            }
           }
 
           // Boutique, Runway, Boat Dock & Reef Floating Zone Banners
@@ -7522,6 +8117,7 @@ export default function App() {
                 radius: 0,
                 variant: 0,
                 respawnTimer: 0,
+                vipRewardId: item.vipRewardId ?? null,
                 listing: item.listing ?? null,
               };
               const spr = getPropSprite(ghostInterior, 0);
@@ -7537,6 +8133,73 @@ export default function App() {
             ctx.setLineDash([5, 3]);
             ctx.strokeRect(gx + 1, gy + 1, gridW - 2, gridH - 2);
             ctx.restore();
+          } else if (
+            !modalOpenRef.current &&
+            selectedVipPlaceIdRef.current &&
+            (vipDecorCountsRef.current[selectedVipPlaceIdRef.current] || 0) > 0
+          ) {
+            const vipId = selectedVipPlaceIdRef.current;
+            const vipReward = getVipReward(vipId);
+            let pCol: number;
+            let pRow: number;
+            if (mouseHoverRef.current.active) {
+              pCol = Math.floor((mouseHoverRef.current.screenX / PIXEL_SCALE + camX) / TILE_SIZE);
+              pRow = Math.floor((mouseHoverRef.current.screenY / PIXEL_SCALE + camY) / TILE_SIZE);
+            } else {
+              const reach = 14;
+              const fx = p.x + (p.dir === 'right' ? reach : p.dir === 'left' ? -reach : 0);
+              const fy = p.y + (p.dir === 'down' ? reach : p.dir === 'up' ? -reach : 0);
+              pCol = Math.floor(fx / TILE_SIZE);
+              pRow = Math.floor(fy / TILE_SIZE);
+            }
+            if (vipReward && pCol >= 0 && pCol < MAP_COLS && pRow >= 0 && pRow < MAP_ROWS) {
+              const tileT = tiles[pRow]?.[pCol];
+              const isFlatVip =
+                vipReward.decorArchetype === 'carpet' ||
+                vipReward.decorArchetype === 'runway_tile' ||
+                vipReward.decorArchetype === 'mosaic_rug';
+              const validFloor =
+                tileT === TileType.GRASS ||
+                tileT === TileType.GRASS_FLOWER ||
+                tileT === TileType.DIRT_PATH ||
+                tileT === TileType.SAND ||
+                tileT === TileType.DOCK ||
+                tileT === TileType.BOUTIQUE_FLOOR;
+              const isValidVip =
+                validFloor &&
+                !isLandmarkTile(pCol, pRow) &&
+                !worldRef.current.props.some((pr) => {
+                  if (pr.respawnTimer > 0 && pr.kind !== 'palm') return false;
+                  if (pr.kind === 'boutique_backwall') {
+                    return pRow === pr.row && pCol >= pr.col && pCol < pr.col + getShopTierSpec(pr.shopTier).cols;
+                  }
+                  if (isFlatVip && !pr.solid) return pr.col === pCol && pr.row === pRow;
+                  if (!isFlatVip && pr.solid) return pr.col === pCol && pr.row === pRow;
+                  return false;
+                });
+              const gx = (pCol * TILE_SIZE - camX) * PIXEL_SCALE;
+              const gy = (pRow * TILE_SIZE - camY) * PIXEL_SCALE;
+              const size = TILE_SIZE * PIXEL_SCALE;
+              ctx.fillStyle = isValidVip ? 'rgba(250, 204, 21, 0.28)' : 'rgba(248, 113, 113, 0.28)';
+              ctx.fillRect(gx, gy, size, size);
+              ctx.save();
+              ctx.globalAlpha = isValidVip ? 0.85 : 0.4;
+              const vSpr = renderVipPropSprite(vipId, 0);
+              ctx.drawImage(
+                vSpr,
+                gx + ((TILE_SIZE - vSpr.width) / 2) * PIXEL_SCALE,
+                gy + (TILE_SIZE - vSpr.height) * PIXEL_SCALE,
+                vSpr.width * PIXEL_SCALE,
+                vSpr.height * PIXEL_SCALE
+              );
+              ctx.restore();
+              ctx.save();
+              ctx.strokeStyle = isValidVip ? '#facc15' : '#ef4444';
+              ctx.lineWidth = 2;
+              ctx.setLineDash([4, 2]);
+              ctx.strokeRect(gx + 1, gy + 1, size - 2, size - 2);
+              ctx.restore();
+            }
           } else if (
             !modalOpenRef.current &&
             activeDef &&
@@ -7656,10 +8319,12 @@ export default function App() {
             dir: Direction;
             anim: number;
             heartUntil?: number;
+            petAccessory?: string | null;
           };
           type RenderItem =
             | { type: 'prop'; y: number; prop: PropObject }
             | { type: 'char'; y: number; char: CharacterEntity; boatPet?: BoatPetRenderInfo | null }
+            | { type: 'vip_npc'; y: number }
             | {
                 type: 'pet';
                 y: number;
@@ -7668,6 +8333,7 @@ export default function App() {
                 dir: Direction;
                 anim: number;
                 heartUntil?: number;
+                petAccessory?: string | null;
               };
 
           const activeTrendFrame = getCurrentFashionTrend(nowWall).trend;
@@ -7683,16 +8349,26 @@ export default function App() {
             ) {
               continue;
             }
-            if (isRugKind(prop.kind)) {
+            const isFlatVipCarpet =
+              prop.kind === 'vip_decor' &&
+              (() => {
+                const r = getVipReward(prop.vipRewardId);
+                return (
+                  r?.decorArchetype === 'carpet' ||
+                  r?.decorArchetype === 'runway_tile' ||
+                  r?.decorArchetype === 'mosaic_rug'
+                );
+              })();
+            if (isRugKind(prop.kind) || isFlatVipCarpet) {
               rugProps.push(prop);
               continue;
             }
             renderables.push({ type: 'prop', y: prop.y, prop });
           }
 
-          // Walkable Woven Rugs rendered as ground overlay underneath players, pets & furniture
+          // Walkable Woven Rugs & VIP Carpets rendered as ground overlay underneath players, pets & furniture
           for (const rug of rugProps) {
-            const rugSpr = getPropSprite(rug, 0);
+            const rugSpr = getPropSprite(rug, swayFrame);
             const rx = Math.round(rug.x - rugSpr.width / 2 - camX) * PIXEL_SCALE;
             const ry = Math.round(rug.y - rugSpr.height + 2 - camY) * PIXEL_SCALE;
             ctx.drawImage(rugSpr, rx, ry, rugSpr.width * PIXEL_SCALE, rugSpr.height * PIXEL_SCALE);
@@ -7709,6 +8385,10 @@ export default function App() {
           const localShowcasing =
             socialStateRef.current.runwayShowAt > 0 && nowWall - socialStateRef.current.runwayShowAt < 5000;
 
+          if (vipRenderEv.isDocked) {
+            renderables.push({ type: 'vip_npc', y: vipNpcRef.current.y });
+          }
+
           for (const ch of npcsRef.current) {
             renderables.push({ type: 'char', y: ch.y, char: ch });
           }
@@ -7719,6 +8399,8 @@ export default function App() {
               ...p,
               isBoating: isBoatingRef.current,
               equippedBoat: equippedBoatRef.current,
+              boatSkin: equippedBoatSkinRef.current,
+              vipTitle: equippedVipTitleRef.current,
               chatText: localChat,
               emoteEmoji: localEmoteEmoji,
               isShowcasing: localShowcasing,
@@ -7730,6 +8412,7 @@ export default function App() {
                     dir: p.dir,
                     anim: localPetRef.current.anim,
                     heartUntil: localPetHeartUntilRef.current,
+                    petAccessory: equippedPetAccessoryRef.current,
                   }
                 : null,
           });
@@ -7742,6 +8425,7 @@ export default function App() {
               dir: localPetRef.current.dir,
               anim: localPetRef.current.anim,
               heartUntil: localPetHeartUntilRef.current,
+              petAccessory: equippedPetAccessoryRef.current,
             });
           }
 
@@ -7766,6 +8450,8 @@ export default function App() {
                 isPlayer: false,
                 isBoating: Boolean(rp.isBoating),
                 equippedBoat: rp.equippedBoat ?? 'rowboat',
+                boatSkin: rp.boatSkin ?? null,
+                vipTitle: rp.vipTitle ?? null,
                 chatText: rpChat,
                 emoteEmoji: rpEmote,
                 isShowcasing: rpShow,
@@ -7777,6 +8463,7 @@ export default function App() {
                       dir: rp.dir,
                       anim: rp.petAnim,
                       heartUntil: rp.petHeartUntil,
+                      petAccessory: rp.petAccessory ?? null,
                     }
                   : null,
             });
@@ -7789,6 +8476,7 @@ export default function App() {
                 dir: rp.petDir,
                 anim: rp.petAnim,
                 heartUntil: rp.petHeartUntil,
+                petAccessory: rp.petAccessory ?? null,
               });
             }
           }
@@ -7961,6 +8649,23 @@ export default function App() {
                 postNightGlowDraws.push(() => {
                   drawWarmLanternGlow(sx + 43 * PIXEL_SCALE, sy + 15 * PIXEL_SCALE, 15 * PIXEL_SCALE);
                 });
+              } else if (pr.kind === 'vip_decor' || pr.kind === 'vip_trophy') {
+                const vReward = getVipReward(pr.vipRewardId);
+                if (vReward?.emitsLight || pr.kind === 'vip_trophy') {
+                  const glowColor = vReward?.lightColor || vReward?.colors[0] || '#fde047';
+                  const gCx = sx + (spr.width / 2) * PIXEL_SCALE;
+                  const gCy = sy + (spr.height / 2) * PIXEL_SCALE;
+                  postNightGlowDraws.push(() => {
+                    const rad = 14 * PIXEL_SCALE;
+                    const g = ctx.createRadialGradient(gCx, gCy, 1, gCx, gCy, rad);
+                    g.addColorStop(0, `${glowColor}66`);
+                    g.addColorStop(1, `${glowColor}00`);
+                    ctx.fillStyle = g;
+                    ctx.beginPath();
+                    ctx.arc(gCx, gCy, rad, 0, Math.PI * 2);
+                    ctx.fill();
+                  });
+                }
               }
 
               // Mannequin animated pixel effects + Weather/Night Reactive Secondary States
@@ -8067,6 +8772,9 @@ export default function App() {
                 0.24
               );
               ctx.drawImage(petSpr, px, py, petSpr.width * PIXEL_SCALE, petSpr.height * PIXEL_SCALE);
+              if (item.petAccessory) {
+                drawPetAccessoryOverlay(ctx, item.petAccessory, px, py, PIXEL_SCALE, globalTime);
+              }
               if (item.heartUntil && item.heartUntil > nowWall) {
                 const bobHeart = Math.sin(globalTime * 7) * 2;
                 const heartX = (item.x - camX) * PIXEL_SCALE;
@@ -8074,6 +8782,29 @@ export default function App() {
                   drawFloatingEmoji(ctx, '❤️', heartX, py + 2, bobHeart);
                 });
               }
+            } else if (item.type === 'vip_npc') {
+              const vNpcDraw = vipNpcRef.current;
+              const vFrame = vNpcDraw.isMoving ? Math.floor(vNpcDraw.animTime) % 4 : 0;
+              const vSpr = renderVipStylistNpcSprite(vNpcDraw.dir, vFrame);
+              const vx = Math.round(vNpcDraw.x - 8 - camX) * PIXEL_SCALE;
+              const vy = Math.round(vNpcDraw.y - 22 - camY) * PIXEL_SCALE;
+              const vCenterX = (vNpcDraw.x - camX) * PIXEL_SCALE;
+              // Golden VIP carpet aura underneath Madame Lumière
+              ctx.save();
+              ctx.fillStyle = `rgba(250, 204, 21, ${(0.22 + 0.1 * Math.sin(globalTime * 4)).toFixed(2)})`;
+              ctx.beginPath();
+              ctx.ellipse(vCenterX, vy + 22 * PIXEL_SCALE, 8 * PIXEL_SCALE, 3 * PIXEL_SCALE, 0, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.restore();
+              drawSoftEllipticalShadow(vCenterX, vy + 22 * PIXEL_SCALE, 5.8 * PIXEL_SCALE, 2.2 * PIXEL_SCALE, 0.28);
+              ctx.drawImage(vSpr, vx, vy, 16 * PIXEL_SCALE, 24 * PIXEL_SCALE);
+              const speechMsg = vNpcDraw.speechLangAr
+                ? `ثيم VIP: ${vipRenderEv.theme.titleAr}`
+                : `VIP Theme: ${vipRenderEv.theme.titleEn}`;
+              postNightLabelDraws.push(() => {
+                drawNameTag(ctx, '★ Madame Lumière (VIP)', vCenterX, vy - 4, true);
+                drawSpeechBubble(ctx, speechMsg, vCenterX, vy - 26);
+              });
             } else {
               const ch = item.char;
               const walkCycle = [0, 1, 2, 3];
@@ -8117,6 +8848,9 @@ export default function App() {
                   const bpx = Math.round(ch.x + seatOffX - petSpr.width / 2 - camX) * PIXEL_SCALE;
                   const bpy = Math.round(ch.y + seatOffY - petSpr.height + 3 - camY) * PIXEL_SCALE;
                   ctx.drawImage(petSpr, bpx, bpy, petSpr.width * PIXEL_SCALE, petSpr.height * PIXEL_SCALE);
+                  if (bPet.petAccessory) {
+                    drawPetAccessoryOverlay(ctx, bPet.petAccessory, bpx, bpy, PIXEL_SCALE, globalTime);
+                  }
                   if (bPet.heartUntil && bPet.heartUntil > nowWall) {
                     const bobHeart = Math.sin(globalTime * 7) * 2;
                     const heartX = (ch.x + seatOffX - camX) * PIXEL_SCALE;
@@ -8127,6 +8861,18 @@ export default function App() {
                 }
                 ctx.drawImage(spr, drawX, drawY, 16 * PIXEL_SCALE, 24 * PIXEL_SCALE);
                 ctx.drawImage(boatSpr, bx, by + 2 * PIXEL_SCALE, boatSpr.width * PIXEL_SCALE, boatSpr.height * PIXEL_SCALE);
+                if (ch.boatSkin) {
+                  drawBoatSkinOverlay(
+                    ctx,
+                    ch.boatSkin,
+                    bx,
+                    by + 2 * PIXEL_SCALE,
+                    boatSpr.width * PIXEL_SCALE,
+                    boatSpr.height * PIXEL_SCALE,
+                    PIXEL_SCALE,
+                    globalTime
+                  );
+                }
               } else {
                 drawSoftEllipticalShadow(
                   (ch.x - camX) * PIXEL_SCALE,
@@ -8225,9 +8971,10 @@ export default function App() {
               const charEmoteEmoji = ch.emoteEmoji;
               const charEmote = ch.emote;
               const charEmoteTimer = ch.emoteTimer;
+              const charVipTitle = ch.vipTitle ?? null;
               postNightLabelDraws.push(() => {
-                drawNameTag(ctx, charName, centerScreenX, topScreenY, isCharPlayer);
-                let bubbleAnchorY = topScreenY - 22;
+                drawNameTag(ctx, charName, centerScreenX, topScreenY, isCharPlayer, charVipTitle);
+                let bubbleAnchorY = topScreenY - (charVipTitle ? 38 : 22);
                 if (charChatText) {
                   drawSpeechBubble(ctx, charChatText, centerScreenX, bubbleAnchorY);
                   bubbleAnchorY -= 38;
@@ -8568,6 +9315,16 @@ export default function App() {
 
   const trendInfo = getCurrentFashionTrend(trendTick);
   const activeTrend = trendInfo.trend;
+  const vipEventState = getVipEventState(trendTick, manualVipVisit);
+  const selectedVipRewardDef = selectedVipPlaceId ? getVipReward(selectedVipPlaceId) : null;
+  const playerMannequinItems = worldRef.current.props
+    .filter(
+      (pr) =>
+        pr.kind === 'mannequin' &&
+        (pr.ownerId ? pr.ownerId === playerId : pr.owner === 'player') &&
+        Boolean(pr.listing?.item)
+    )
+    .map((pr) => pr.listing!.item);
   const isAuctionLive = Boolean(activeAuction && !activeAuction.settled && activeAuction.endsAtMs > trendTick);
   const auctionSecondsLeft = activeAuction
     ? Math.max(0, Math.ceil((activeAuction.endsAtMs - trendTick) / 1000))
@@ -8752,6 +9509,8 @@ export default function App() {
     boatModalOpen ||
     newsstandOpen ||
     lookbookOpen ||
+    vipEventModalOpen ||
+    vipCatalogModalOpen ||
     manageShopId !== null ||
     activeStallPropId !== null ||
     buyPreviewPropId !== null;
@@ -8769,259 +9528,410 @@ export default function App() {
         className="pixelated block h-full w-full touch-none cursor-crosshair"
       />
 
-      {/* TOP-LEFT HUD: COMPACT 6-SLOT WOODEN HOTBAR */}
-      <div className="pointer-events-auto absolute top-2.5 left-2.5 z-20 flex flex-col items-start gap-1">
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => {
-              sfx.playClick();
-              setHotbarMode('gather');
-              setSelectedDecorKind(null);
-              setSelectedSlot((s) => Math.min(s, HOTBAR_GATHER.length - 1));
-            }}
-            className={`cursor-pointer border px-2 py-0.5 text-[10px] font-bold transition-colors ${
-              hotbarMode === 'gather'
-                ? 'border-[#45230d] bg-[#f6e4bf] text-[#3d1e0b]'
-                : 'border-[#45230d] bg-[#7d4720] text-[#f2d6a7] hover:bg-[#965729]'
-            }`}
-          >
-            Bag &amp; Dock
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              sfx.playClick();
-              setHotbarMode('build');
-            }}
-            className={`cursor-pointer border px-2 py-0.5 text-[10px] font-bold transition-colors ${
-              hotbarMode === 'build'
-                ? 'border-[#45230d] bg-[#f6e4bf] text-[#3d1e0b]'
-                : 'border-[#45230d] bg-[#7d4720] text-[#f2d6a7] hover:bg-[#965729]'
-            }`}
-          >
-            Build &amp; Tools
-          </button>
-        </div>
+      {/* UNIFIED NON-OVERLAPPING TOP HUD BAR (LEFT HOTBAR · CENTER EVENTS · RIGHT CONTROLS & MINIMAP) */}
+      <div className="pointer-events-none absolute inset-x-2 top-2 z-20 flex items-start justify-between gap-2 sm:inset-x-2.5 sm:top-2.5 sm:gap-3">
+        {/* TOP-LEFT: COMPACT 6-SLOT WOODEN HOTBAR */}
+        <div className="pointer-events-auto flex shrink-0 flex-col items-start gap-1">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setHotbarMode('gather');
+                setSelectedDecorKind(null);
+                setSelectedSlot((s) => Math.min(s, HOTBAR_GATHER.length - 1));
+              }}
+              className={`cursor-pointer border px-1.5 py-0.5 text-[10px] font-bold transition-colors sm:px-2 ${
+                hotbarMode === 'gather'
+                  ? 'border-[#45230d] bg-[#f6e4bf] text-[#3d1e0b]'
+                  : 'border-[#45230d] bg-[#7d4720] text-[#f2d6a7] hover:bg-[#965729]'
+              }`}
+            >
+              Bag &amp; Dock
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setHotbarMode('build');
+              }}
+              className={`cursor-pointer border px-1.5 py-0.5 text-[10px] font-bold transition-colors sm:px-2 ${
+                hotbarMode === 'build'
+                  ? 'border-[#45230d] bg-[#f6e4bf] text-[#3d1e0b]'
+                  : 'border-[#45230d] bg-[#7d4720] text-[#f2d6a7] hover:bg-[#965729]'
+              }`}
+            >
+              Build &amp; Tools
+            </button>
+          </div>
 
-        <div className="wood-frame flex items-center gap-1 p-1">
-          {(hotbarMode === 'gather' ? HOTBAR_GATHER : HOTBAR_BUILD).map((slot, idx) => {
-            const active = !(hotbarMode === 'build' && selectedDecorDef) && selectedSlot === idx;
-            const count = slot.stackable ? inventory[slot.kind as keyof InventoryCounts] : undefined;
-            return (
+          <div className="wood-frame flex items-center gap-0.5 p-1 sm:gap-1">
+            {(hotbarMode === 'gather' ? HOTBAR_GATHER : HOTBAR_BUILD).map((slot, idx) => {
+              const active = !(hotbarMode === 'build' && selectedDecorDef) && selectedSlot === idx;
+              const count = slot.stackable ? inventory[slot.kind as keyof InventoryCounts] : undefined;
+              return (
+                <button
+                  key={`${hotbarMode}_${slot.kind}`}
+                  type="button"
+                  onClick={() => {
+                    setSelectedDecorKind(null);
+                    setSelectedSlot(idx);
+                    sfx.playClick();
+                  }}
+                  title={`${slot.name} (${idx + 1})`}
+                  className={`relative flex h-7 w-7 cursor-pointer items-center justify-center transition-transform sm:h-8 sm:w-8 md:h-9 md:w-9 focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                    active ? 'wood-slot-active -translate-y-0.5' : 'wood-slot hover:brightness-105'
+                  }`}
+                >
+                  <span className="font-pixel absolute top-0.5 left-0.5 text-[7px] leading-none text-[#6b3c1b] sm:text-[8px]">
+                    {idx + 1}
+                  </span>
+                  <PixelItemIcon kind={slot.kind} size={19} />
+                  {count !== undefined && (
+                    <span className="font-pixel tabular-nums absolute right-0.5 bottom-0.5 text-[8px] font-bold leading-none text-[#3d1e0b] drop-shadow-[0_1px_0_rgba(255,255,255,0.85)] sm:text-[9px]">
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {selectedVipRewardDef ? (
+            <div className="wood-panel flex items-center gap-1.5 border border-[#78350f] bg-[#fef3c7] px-2 py-0.5 text-[10px] font-bold text-[#78350f]">
+              <Crown className="h-3.5 w-3.5 text-[#b45309]" />
+              <span className="tabular-nums">
+                Placing VIP: {selectedVipRewardDef.name} (×{vipDecorCounts[selectedVipRewardDef.id] || 0})
+              </span>
               <button
-                key={`${hotbarMode}_${slot.kind}`}
                 type="button"
                 onClick={() => {
-                  setSelectedDecorKind(null);
-                  setSelectedSlot(idx);
                   sfx.playClick();
+                  setSelectedVipPlaceId(null);
                 }}
-                title={`${slot.name} (${idx + 1})`}
-                className={`relative flex h-8 w-8 cursor-pointer items-center justify-center transition-transform sm:h-9 sm:w-9 focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                  active ? 'wood-slot-active -translate-y-0.5' : 'wood-slot hover:brightness-105'
-                }`}
+                className="cursor-pointer border border-[#7f1d1d] bg-[#fee2e2] px-1.5 py-0.2 text-[9px] font-bold text-[#991b1b] hover:brightness-105"
               >
-                <span className="font-pixel absolute top-0.5 left-0.5 text-[8px] leading-none text-[#6b3c1b]">
-                  {idx + 1}
-                </span>
-                <PixelItemIcon kind={slot.kind} size={21} />
-                {count !== undefined && (
-                  <span className="font-pixel tabular-nums absolute right-0.5 bottom-0.5 text-[9px] font-bold leading-none text-[#3d1e0b] drop-shadow-[0_1px_0_rgba(255,255,255,0.85)]">
-                    {count}
-                  </span>
-                )}
+                Cancel
               </button>
-            );
-          })}
-        </div>
-
-        {selectedDecorDef ? (
-          <div className="wood-panel flex items-center gap-1.5 border border-[#45230d] px-2 py-0.5 text-[10px] font-bold text-[#3d1e0b]">
-            <PixelItemIcon kind={selectedDecorDef.kind} size={14} />
-            <span className="tabular-nums">
-              Placing: {selectedDecorDef.name} (×{inventory[selectedDecorDef.kind as keyof InventoryCounts]})
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                sfx.playClick();
-                setSelectedDecorKind(null);
-              }}
-              className="cursor-pointer border border-[#7f1d1d] bg-[#fee2e2] px-1.5 py-0.2 text-[9px] font-bold text-[#991b1b] hover:brightness-105"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <div className="wood-panel px-2 py-0.5 text-[10px] font-semibold text-[#3d1e0b]">
-            {activeSlotDef.name}
-          </div>
-        )}
-      </div>
-
-      {/* TOP-CENTER HUD: SHOP RELOCATION BAR OR COMPACT DYNAMIC FASHION TREND PILL */}
-      {movingShop ? (
-        <div className="pointer-events-none fixed inset-x-0 top-2.5 z-30 flex justify-center px-3">
-          <div className="wood-panel pointer-events-auto flex flex-wrap items-center gap-2 border-2 border-[#45230d] px-3 py-1.5 text-xs font-bold text-[#3d1e0b] shadow-lg">
-            <Package className="h-4 w-4 text-[#9a3412]" />
-            <span>
-              Moving Tier {movingShop.tier} Boutique ({movingShop.spanCols}×{movingShop.spanRows}) ·{' '}
-              <span className="font-semibold text-[#6b3c1b]">
-                {movingShop.interiorItems.length} interior items attached
+            </div>
+          ) : selectedDecorDef ? (
+            <div className="wood-panel flex items-center gap-1.5 border border-[#45230d] px-2 py-0.5 text-[10px] font-bold text-[#3d1e0b]">
+              <PixelItemIcon kind={selectedDecorDef.kind} size={14} />
+              <span className="tabular-nums">
+                Placing: {selectedDecorDef.name} (×{inventory[selectedDecorDef.kind as keyof InventoryCounts]})
               </span>
-            </span>
-            <button
-              type="button"
-              onClick={() => triggerActionAt()}
-              className="flex h-7 cursor-pointer items-center gap-1 border-2 border-[#14532d] bg-[#86efac] px-2.5 text-[11px] font-bold text-[#14532d] hover:brightness-105"
-            >
-              <Check className="h-3.5 w-3.5" />
-              <span>Place Here</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                sfx.playClick();
-                setMovingShop(null);
-              }}
-              className="flex h-7 cursor-pointer items-center gap-1 border-2 border-[#7f1d1d] bg-[#fee2e2] px-2 text-[11px] font-bold text-[#991b1b] hover:brightness-105"
-            >
-              <X className="h-3.5 w-3.5" />
-              <span>Cancel</span>
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="pointer-events-none absolute inset-x-0 top-2.5 z-20 hidden justify-center md:flex">
-          <div className="pointer-events-auto flex items-center gap-1.5">
-            <div
-              className="wood-panel flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-bold text-[#3d1e0b]"
-              title={`Fashion Trend: ${activeTrend.label} — Matching mannequin sales earn 2x Gold!`}
-            >
-              <Sparkles className="h-3.5 w-3.5 text-[#b45309]" />
-              <span>Trend:</span>
-              <span
-                className="border border-[#45230d]/40 px-1.5 py-0.2 text-[10px] font-bold"
-                style={{ backgroundColor: activeTrend.accentBg, color: activeTrend.accentText }}
+              <button
+                type="button"
+                onClick={() => {
+                  sfx.playClick();
+                  setSelectedDecorKind(null);
+                }}
+                className="cursor-pointer border border-[#7f1d1d] bg-[#fee2e2] px-1.5 py-0.2 text-[9px] font-bold text-[#991b1b] hover:brightness-105"
               >
-                {activeTrend.shortLabel} · 2×
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="wood-panel px-2 py-0.5 text-[10px] font-semibold text-[#3d1e0b]">
+              {activeSlotDef.name}
+            </div>
+          )}
+        </div>
+
+        {/* TOP-CENTER: FLEXIBLE NON-OVERLAPPING EVENT & STATUS BAR */}
+        <div className="pointer-events-none flex min-w-0 flex-1 flex-col items-center gap-1.5">
+          {movingShop ? (
+            <div className="wood-panel pointer-events-auto flex flex-wrap items-center justify-center gap-2 border-2 border-[#45230d] px-3 py-1.5 text-xs font-bold text-[#3d1e0b] shadow-lg">
+              <Package className="h-4 w-4 text-[#9a3412]" />
+              <span>
+                Moving Tier {movingShop.tier} ({movingShop.spanCols}×{movingShop.spanRows}) ·{' '}
+                <span className="font-semibold text-[#6b3c1b]">
+                  {movingShop.interiorItems.length} items
+                </span>
               </span>
-              <span className="font-pixel tabular-nums text-[10px] text-[#6b3c1b]">
-                {trendInfo.formattedTime}
+              <button
+                type="button"
+                onClick={() => triggerActionAt()}
+                className="flex h-7 cursor-pointer items-center gap-1 border-2 border-[#14532d] bg-[#86efac] px-2.5 text-[11px] font-bold text-[#14532d] hover:brightness-105"
+              >
+                <Check className="h-3.5 w-3.5" />
+                <span>Place Here</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  sfx.playClick();
+                  setMovingShop(null);
+                }}
+                className="flex h-7 cursor-pointer items-center gap-1 border-2 border-[#7f1d1d] bg-[#fee2e2] px-2 text-[11px] font-bold text-[#991b1b] hover:brightness-105"
+              >
+                <X className="h-3.5 w-3.5" />
+                <span>Cancel</span>
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1.5">
+                <div
+                  className="wood-panel flex h-7 items-center gap-1 px-2 text-[10px] font-bold text-[#3d1e0b]"
+                  title={`Fashion Trend: ${activeTrend.label} — Matching mannequin sales earn 2x Gold!`}
+                >
+                  <Sparkles className="h-3 w-3 shrink-0 text-[#b45309]" />
+                  <span
+                    className="border border-[#45230d]/35 px-1 py-0.2 text-[9px] font-bold whitespace-nowrap"
+                    style={{ backgroundColor: activeTrend.accentBg, color: activeTrend.accentText }}
+                  >
+                    {activeTrend.shortLabel} 2×
+                  </span>
+                  <span className="font-pixel tabular-nums text-[9px] text-[#6b3c1b]">
+                    {trendInfo.formattedTime}
+                  </span>
+                </div>
+
+                {vipEventState.isDocked ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sfx.playChime();
+                      setHudMenuOpen(false);
+                      setVipEventModalOpen(true);
+                    }}
+                    title={`VIP Stylist Active (${vipEventState.theme.titleEn} / ${vipEventState.theme.titleAr}) — Click to submit your outfit or shop mannequins!`}
+                    className="flex h-7 cursor-pointer items-center gap-1.5 rounded-sm border-2 border-[#78350f] bg-gradient-to-r from-[#fef08a] via-[#facc15] to-[#f59e0b] px-2.5 text-[11px] font-extrabold text-[#3d1a04] shadow-[0_0_16px_rgba(250,204,21,0.85)] ring-1 ring-[#fef08a] transition-transform hover:scale-[1.02] hover:brightness-105 active:scale-95 whitespace-nowrap"
+                  >
+                    <span className="h-2 w-2 animate-ping rounded-full bg-[#b45309]" />
+                    <Crown className="h-3.5 w-3.5 shrink-0 text-[#78350f]" />
+                    <span>Submit to VIP</span>
+                    <span className="hidden xl:inline" dir="rtl">
+                      · قدّم أزياءك
+                    </span>
+                    <span className="rounded-xs bg-[#451a03]/15 px-1 font-pixel text-[9px] tabular-nums text-[#451a03]">
+                      {vipEventState.formattedTime}
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sfx.playClick();
+                      setHudMenuOpen(false);
+                      setVipEventModalOpen(true);
+                    }}
+                    title="VIP Luxury Yacht docks every 20 min for 5 min — Click to view schedule or invite!"
+                    className="flex h-7 cursor-pointer items-center gap-1 border-2 border-[#78350f]/80 bg-[#fff7e6] px-2 text-[10px] font-extrabold text-[#78350f] shadow-sm hover:brightness-105 whitespace-nowrap"
+                  >
+                    <Crown className="h-3 w-3 shrink-0 text-[#b45309]" />
+                    <span className="tabular-nums">VIP {vipEventState.formattedTime}</span>
+                  </button>
+                )}
+
+                {isAuctionLive && activeAuction && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sfx.playClick();
+                      setRunwayModalOpen(true);
+                    }}
+                    className="flex h-7 cursor-pointer items-center gap-1 border-2 border-[#7f1d1d] bg-[#fee2e2] px-2 text-[10px] font-bold text-[#991b1b] shadow-sm hover:brightness-105 whitespace-nowrap"
+                  >
+                    <Gavel className="h-3 w-3 shrink-0" />
+                    <span className="tabular-nums">
+                      {activeAuction.highestBid}G · {auctionSecondsLeft}s
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {/* Bilingual Arabic & English VIP Event Hint Banner while Luxury Yacht is Docked */}
+              {vipEventState.isDocked &&
+                !anyModalBlockingHud &&
+                dismissedVipHintVisitId !== vipEventState.visitId &&
+                !judgedVipVisitIds.includes(vipEventState.visitId) && (
+                  <div className="pointer-events-auto flex w-full max-w-[440px] items-start gap-2 rounded-sm border-2 border-[#78350f] bg-[#fffbeb]/95 px-2.5 py-1.5 text-[10px] font-bold text-[#451a03] shadow-md backdrop-blur-[2px]">
+                    <div className="min-w-0 flex-1 space-y-0.5 leading-snug">
+                      <div>
+                        <span className="text-[#b45309]">★ VIP ({vipEventState.theme.titleEn}):</span>{' '}
+                        Click <strong>Submit to VIP</strong> or Madame Lumière to pick outfits from your Wardrobe or judge your mannequins.
+                      </div>
+                      <div dir="rtl" className="text-right text-[#78350f]">
+                        <span className="text-[#b45309]">★ ثيم VIP ({vipEventState.theme.titleAr}):</span>{' '}
+                        اضغط <strong>قدّم أزياءك</strong> أو انقر على مدام لوميير لاختيار ملابسك أو تقييم مانيكانات متجرك.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sfx.playClick();
+                        setDismissedVipHintVisitId(vipEventState.visitId);
+                      }}
+                      aria-label="Hide VIP Hint"
+                      className="mt-0.5 shrink-0 cursor-pointer rounded-xs border border-[#c79963] bg-[#fef3c7] p-0.5 text-[#78350f] hover:bg-[#fde68a]"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
+            </>
+          )}
+        </div>
+
+        {/* TOP-RIGHT: COMPACT ICON CONTROLS, SETTINGS/DEBUG POPOVER, SHOPS, ONLINE, GOLD & MINIMAP */}
+        <div className="pointer-events-auto relative flex shrink-0 flex-col items-end gap-1.5">
+          <div className="flex flex-wrap items-center justify-end gap-1">
+            <PWAInstallButton variant="hud" onPlayClick={() => sfx.playClick()} />
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setTimeOfDayMode((m) => (m === 'auto' ? 'night' : m === 'night' ? 'day' : 'auto'));
+              }}
+              title={`Time of Day: ${timeOfDayMode === 'auto' ? 'Auto Cycle' : timeOfDayMode === 'night' ? 'Night (Glow)' : 'Daylight'}`}
+              aria-label="Toggle Day/Night Lighting"
+              className={`wood-btn flex h-7 w-7 cursor-pointer items-center justify-center focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                timeOfDayMode === 'night' ? 'ring-2 ring-[#67e8f9]' : ''
+              }`}
+            >
+              {timeOfDayMode === 'night' ? (
+                <Moon className="h-3.5 w-3.5 text-[#1e3a8a]" />
+              ) : (
+                <Sun className="h-3.5 w-3.5 text-[#b45309]" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setWeatherMode((w) => (w === 'auto' ? 'rain' : w === 'rain' ? 'sunny' : 'auto'));
+              }}
+              title={`Island Weather: ${weatherMode === 'auto' ? 'Auto Showers' : weatherMode === 'rain' ? 'Tropical Rain' : 'Clear Sky'}`}
+              aria-label="Toggle Island Weather"
+              className={`wood-btn flex h-7 w-7 cursor-pointer items-center justify-center focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                weatherMode === 'rain' ? 'ring-2 ring-[#38bdf8]' : ''
+              }`}
+            >
+              <CloudRain
+                className={`h-3.5 w-3.5 ${weatherMode === 'rain' ? 'text-[#0284c7]' : 'text-[#5c361a]'}`}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setShowTouchControls((v) => !v);
+              }}
+              title={showTouchControls ? 'Hide On-Screen Joystick' : 'Show On-Screen Joystick'}
+              aria-label={showTouchControls ? 'Hide On-Screen Joystick' : 'Show On-Screen Joystick'}
+              className={`wood-btn flex h-7 w-7 cursor-pointer items-center justify-center focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                showTouchControls ? 'ring-2 ring-[#fde047]' : 'opacity-80'
+              }`}
+            >
+              <Gamepad2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sfx.playClick();
+                setHudMenuOpen((o) => !o);
+              }}
+              title="Island Settings & VIP Event Controls"
+              aria-label="Island Settings & VIP Event Controls"
+              className={`wood-btn flex h-7 w-7 cursor-pointer items-center justify-center focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                hudMenuOpen ? 'ring-2 ring-[#f59e0b]' : ''
+              }`}
+            >
+              <Settings className="h-3.5 w-3.5 text-[#5c361a]" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setHudMenuOpen(false);
+                openShopsModal();
+              }}
+              title="Top Traders & Island Shops Teleport"
+              className="wood-btn flex h-7 cursor-pointer items-center gap-1 px-2 text-[11px] font-bold focus-visible:outline-2 focus-visible:outline-amber-300"
+            >
+              <Trophy className="h-3 w-3 shrink-0 text-[#b45309]" />
+              <span className="hidden sm:inline">Shops</span>
+            </button>
+            <div
+              className="wood-panel flex h-7 items-center gap-1 px-1.5 text-[11px] font-bold text-[#3d1e0b]"
+              title={`${onlineCount} player(s) online`}
+            >
+              <span className="h-2 w-2 rounded-full border border-[#14532d] bg-[#22c55e]" />
+              <Users className="hidden h-3 w-3 text-[#5c361a] sm:inline" />
+              <span className="tabular-nums">{onlineCount}</span>
+            </div>
+            <div className="wood-panel flex h-7 items-center gap-1 px-2">
+              <GoldCoinIcon size={15} />
+              <span className="font-pixel tabular-nums text-[11px] font-bold tracking-wide text-[#47250e] whitespace-nowrap">
+                {gold} G
               </span>
             </div>
-
-            {isAuctionLive && activeAuction && (
-              <button
-                type="button"
-                onClick={() => {
-                  sfx.playClick();
-                  setRunwayModalOpen(true);
-                }}
-                className="flex cursor-pointer items-center gap-1 border-2 border-[#7f1d1d] bg-[#fee2e2] px-2 py-1 text-[10px] font-bold text-[#991b1b] shadow-sm hover:brightness-105"
-              >
-                <Gavel className="h-3 w-3" />
-                <span className="tabular-nums">
-                  Auction: {activeAuction.highestBid}G · {auctionSecondsLeft}s
-                </span>
-              </button>
-            )}
           </div>
-        </div>
-      )}
 
-      {/* TOP-RIGHT HUD: COMPACT TOUCH TOGGLE, SHOPS TELEPORT, ONLINE COUNTER, GOLD & MINIMAP */}
-      <div className="pointer-events-auto absolute top-2.5 right-2.5 z-20 flex flex-col items-end gap-1.5">
-        <div className="flex items-center justify-end gap-1">
-          <PWAInstallButton variant="hud" onPlayClick={() => sfx.playClick()} />
-          <button
-            type="button"
-            onClick={() => {
-              sfx.playClick();
-              setTimeOfDayMode((m) => (m === 'auto' ? 'night' : m === 'night' ? 'day' : 'auto'));
-            }}
-            title={`Time of Day: ${timeOfDayMode === 'auto' ? 'Auto Cycle' : timeOfDayMode === 'night' ? 'Night (Glow)' : 'Daylight'}`}
-            aria-label="Toggle Day/Night Lighting"
-            className={`wood-btn flex cursor-pointer items-center gap-1 px-2 py-0.5 text-[11px] font-bold focus-visible:outline-2 focus-visible:outline-amber-300 ${
-              timeOfDayMode === 'night' ? 'ring-2 ring-[#67e8f9]' : ''
-            }`}
-          >
-            {timeOfDayMode === 'night' ? (
-              <Moon className="h-3.5 w-3.5 text-[#1e3a8a]" />
-            ) : (
-              <Sun className="h-3.5 w-3.5 text-[#b45309]" />
-            )}
-            <span className="hidden sm:inline">
-              {timeOfDayMode === 'auto' ? 'Auto' : timeOfDayMode === 'night' ? 'Night' : 'Day'}
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              sfx.playClick();
-              setWeatherMode((w) => (w === 'auto' ? 'rain' : w === 'rain' ? 'sunny' : 'auto'));
-            }}
-            title={`Island Weather: ${weatherMode === 'auto' ? 'Auto Showers' : weatherMode === 'rain' ? 'Tropical Rain (triggers Rain Outfits)' : 'Clear Sky'}`}
-            aria-label="Toggle Island Weather"
-            className={`wood-btn flex cursor-pointer items-center gap-1 px-2 py-0.5 text-[11px] font-bold focus-visible:outline-2 focus-visible:outline-amber-300 ${
-              weatherMode === 'rain' ? 'ring-2 ring-[#38bdf8]' : ''
-            }`}
-          >
-            <CloudRain
-              className={`h-3.5 w-3.5 ${weatherMode === 'rain' ? 'text-[#0284c7]' : 'text-[#5c361a]'}`}
+          {/* Compact Settings & Debug Popover (houses Summon VIP Now & labeled toggles) */}
+          {hudMenuOpen && (
+            <div className="wood-panel absolute top-8 right-0 z-30 w-56 space-y-2 border-2 border-[#45230d] p-2.5 text-xs text-[#3d1e0b] shadow-xl">
+              <div className="flex items-center justify-between border-b border-[#c79963] pb-1.5">
+                <span className="font-pixel text-[11px] font-bold text-[#45230d]">Island Controls</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    sfx.playClick();
+                    setHudMenuOpen(false);
+                  }}
+                  aria-label="Close Settings Menu"
+                  className="cursor-pointer rounded-xs p-0.5 hover:bg-[#ebd2a4]"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              <div className="space-y-1 text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-[#6b3c1b]">Lighting:</span>
+                  <span className="font-bold capitalize">{timeOfDayMode}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-[#6b3c1b]">Weather:</span>
+                  <span className="font-bold capitalize">{weatherMode}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-[#6b3c1b]">Touch Joystick:</span>
+                  <span className="font-bold">{showTouchControls ? 'Shown' : 'Hidden'}</span>
+                </div>
+              </div>
+
+              <div className="border-t border-[#c79963] pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSummonVipYacht();
+                    setHudMenuOpen(false);
+                  }}
+                  className="flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-sm border-2 border-[#78350f] bg-gradient-to-b from-[#fef08a] to-[#f59e0b] px-2.5 py-1.5 text-[11px] font-extrabold text-[#451a03] shadow-xs hover:brightness-105"
+                >
+                  <Crown className="h-3.5 w-3.5 text-[#78350f]" />
+                  <span>Summon VIP Now (5m)</span>
+                </button>
+                <p className="mt-1 text-center text-[10px] font-medium text-[#6b3c1b]">
+                  Tip: You can also type <span className="font-bold text-[#45230d]">/vip</span> in chat.
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="wood-frame p-1">
+            <canvas
+              ref={minimapCanvasRef}
+              width={MAP_COLS}
+              height={MAP_ROWS}
+              className="pixelated block h-[76px] w-[102px] border border-[#45230d] sm:h-[81px] sm:w-[108px]"
             />
-            <span className="hidden sm:inline">
-              {weatherMode === 'auto' ? 'Sky' : weatherMode === 'rain' ? 'Rain' : 'Clear'}
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              sfx.playClick();
-              setShowTouchControls((v) => !v);
-            }}
-            title={showTouchControls ? 'Hide On-Screen Joystick' : 'Show On-Screen Joystick'}
-            aria-label={showTouchControls ? 'Hide On-Screen Joystick' : 'Show On-Screen Joystick'}
-            className={`wood-btn flex cursor-pointer items-center gap-1 px-2 py-0.5 text-[11px] font-bold focus-visible:outline-2 focus-visible:outline-amber-300 ${
-              showTouchControls ? 'ring-2 ring-[#fde047]' : 'opacity-85'
-            }`}
-          >
-            <Gamepad2 className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Joy</span>
-          </button>
-          <button
-            type="button"
-            onClick={openShopsModal}
-            title="Top Traders & Island Shops Teleport"
-            className="wood-btn flex cursor-pointer items-center gap-1 px-2 py-0.5 text-[11px] font-bold focus-visible:outline-2 focus-visible:outline-amber-300"
-          >
-            <Trophy className="h-3 w-3 text-[#b45309]" />
-            <span>Shops</span>
-          </button>
-          <div className="wood-panel flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold text-[#3d1e0b]">
-            <span className="h-2 w-2 rounded-full border border-[#14532d] bg-[#22c55e]" />
-            <Users className="h-3 w-3 text-[#5c361a]" />
-            <span className="tabular-nums">{onlineCount}</span>
-          </div>
-          <div className="wood-panel flex items-center gap-1.5 px-2 py-0.5">
-            <GoldCoinIcon size={16} />
-            <span className="font-pixel tabular-nums text-xs font-bold tracking-wide text-[#47250e]">
-              {gold} G
-            </span>
-          </div>
-        </div>
-
-        <div className="wood-frame p-1">
-          <canvas
-            ref={minimapCanvasRef}
-            width={MAP_COLS}
-            height={MAP_ROWS}
-            className="pixelated block h-[81px] w-[108px] border border-[#45230d]"
-          />
-          <div className="mt-0.5 flex items-center justify-between px-0.5 text-[9px] font-medium text-[#fae4bd]">
-            <span>Coral Cove</span>
-            <span className="opacity-85">Reef →</span>
+            <div className="mt-0.5 flex items-center justify-between px-0.5 text-[9px] font-medium text-[#fae4bd]">
+              <span>Coral Cove</span>
+              <span className="opacity-85">Reef →</span>
+            </div>
           </div>
         </div>
       </div>
@@ -9123,13 +10033,19 @@ export default function App() {
               type="button"
               onClick={() => {
                 sfx.playClick();
-                if (nearLandmarkPrompt === 'runway') setRunwayModalOpen(true);
+                if (nearLandmarkPrompt === 'vip') setVipEventModalOpen(true);
+                else if (nearLandmarkPrompt === 'runway') setRunwayModalOpen(true);
                 else if (nearLandmarkPrompt === 'newsstand') setNewsstandOpen(true);
                 else setBoatModalOpen(true);
               }}
               className="wood-panel flex cursor-pointer items-center gap-1.5 px-2.5 py-1 text-[11px] font-bold text-[#3d1e0b] hover:brightness-105"
             >
-              {nearLandmarkPrompt === 'runway' ? (
+              {nearLandmarkPrompt === 'vip' ? (
+                <>
+                  <Crown className="h-3.5 w-3.5 text-[#b45309]" />
+                  <span>Press E: VIP Mystery Stylist (Madame Lumière)</span>
+                </>
+              ) : nearLandmarkPrompt === 'runway' ? (
                 <>
                   <Gavel className="h-3.5 w-3.5 text-[#b91c1c]" />
                   <span>Press E: Runway &amp; Live Auction</span>
@@ -9160,7 +10076,7 @@ export default function App() {
                 maxLength={48}
                 value={chatDraft}
                 onChange={(e) => setChatDraft(e.target.value)}
-                placeholder="Say hi... (Enter)"
+                placeholder="Say hi or /vip... (Enter)"
                 className="w-40 border border-[#6b3c1b] bg-[#fff7e6] px-2 py-1 text-xs font-semibold text-[#3d1e0b] focus:outline-none sm:w-52"
               />
               <button
@@ -9271,7 +10187,37 @@ export default function App() {
               setShopsModalOpen(false);
               setRunwayModalOpen(false);
               setBoatModalOpen(false);
+              setNewsstandOpen(false);
               setLookbookOpen(false);
+              setVipEventModalOpen(false);
+              setManageShopId(null);
+              setActiveStallPropId(null);
+              setBuyPreviewPropId(null);
+              setVipCatalogModalOpen(true);
+            }}
+            title="VIP Mystery Stylist Collection Catalog (92 Exclusive Unbuyable Rewards)"
+            className="flex h-8 cursor-pointer items-center gap-1 border-2 border-[#78350f] bg-gradient-to-b from-[#fef08a] to-[#f59e0b] px-2 text-xs font-extrabold text-[#451a03] shadow-[0_2px_0_#78350f] hover:brightness-105"
+          >
+            <Crown className="h-3.5 w-3.5 text-[#78350f]" />
+            <span className="tabular-nums">
+              VIP {vipUnlockedIds.length}/{VIP_REWARD_COUNTS.total}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              sfx.playClick();
+              setCameraModeOpen(false);
+              setWardrobeOpen(false);
+              setCraftingOpen(false);
+              setDesignStudioOpen(false);
+              setShopsModalOpen(false);
+              setRunwayModalOpen(false);
+              setBoatModalOpen(false);
+              setLookbookOpen(false);
+              setVipEventModalOpen(false);
+              setVipCatalogModalOpen(false);
               setManageShopId(null);
               setActiveStallPropId(null);
               setBuyPreviewPropId(null);
@@ -9362,6 +10308,7 @@ export default function App() {
           }}
           baseAppearance={appearance}
           ownedCount={ownedItems.length}
+          unlockedVipIds={vipUnlockedIds}
           renderIngredientIcon={(kind, sz) => <PixelItemIcon kind={kind} size={sz ?? 18} />}
           renderCharacterPreview={renderCharacterSprite}
           onPlayClick={() => sfx.playClick()}
@@ -11160,6 +12107,59 @@ export default function App() {
           onBuyMagazine={handleBuyMagazine}
           onLikeMagazine={handleLikeMagazine}
           onClose={() => setNewsstandOpen(false)}
+        />
+      )}
+
+      {/* VIP MYSTERY STYLIST EVENT & JUDGING MODAL */}
+      {vipEventModalOpen && (
+        <VipEventModal
+          eventState={vipEventState}
+          appearance={appearance}
+          ownedItems={ownedItems}
+          mannequinItems={playerMannequinItems}
+          unlockedIds={vipUnlockedIds}
+          alreadyJudgedVisitIds={judgedVipVisitIds}
+          vipWinsCount={vipWinsCount}
+          onPlayClick={() => sfx.playClick()}
+          onSummonVipYacht={handleSummonVipYacht}
+          onClaimJudgeResult={handleClaimVipJudgeResult}
+          onOpenVipCatalog={() => {
+            setVipEventModalOpen(false);
+            setVipCatalogModalOpen(true);
+          }}
+          onOpenDesignStudio={() => {
+            setVipEventModalOpen(false);
+            setDesignStudioOpen(true);
+          }}
+          onPlaceVipReward={handleStartPlaceVipReward}
+          onEquipVipReward={handleEquipVipReward}
+          onClose={() => setVipEventModalOpen(false)}
+        />
+      )}
+
+      {/* VIP COLLECTION CATALOG MODAL (92 EXCLUSIVE UNBUYABLE REWARDS) */}
+      {vipCatalogModalOpen && (
+        <VipCollectionCatalogModal
+          unlockedIds={vipUnlockedIds}
+          vipDecorCounts={vipDecorCounts}
+          equippedVipTitle={equippedVipTitle}
+          equippedPetAccessory={equippedPetAccessory}
+          equippedBoatSkin={equippedBoatSkin}
+          vipWinsCount={vipWinsCount}
+          eventState={vipEventState}
+          onPlayClick={() => sfx.playClick()}
+          onOpenVipEvent={() => {
+            setVipCatalogModalOpen(false);
+            setVipEventModalOpen(true);
+          }}
+          onOpenDesignStudio={() => {
+            setVipCatalogModalOpen(false);
+            setDesignStudioOpen(true);
+          }}
+          onPlaceVipReward={handleStartPlaceVipReward}
+          onEquipVipReward={handleEquipVipReward}
+          onUnequipKind={handleUnequipVipKind}
+          onClose={() => setVipCatalogModalOpen(false)}
         />
       )}
     </div>

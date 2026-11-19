@@ -47,6 +47,14 @@ import {
 import type { EditionTier } from './constants';
 import type { CloudAppearance } from './firebase';
 
+import {
+  VIP_REWARDS,
+  computeVipBrushPaint,
+  getVipReward,
+  stampVipStickerOnGrid,
+  type VipBrushMode,
+} from './vipStylist';
+
 type ToolKind =
   | 'pencil'
   | 'eraser'
@@ -55,7 +63,9 @@ type ToolKind =
   | 'shade_dark'
   | 'shade_light'
   | 'shimmer_mark'
-  | 'neon_mark';
+  | 'neon_mark'
+  | 'vip_brush'
+  | 'vip_sticker';
 type PreviewEnv = 'day' | 'night' | 'rain';
 type Direction = 'down' | 'up' | 'left' | 'right';
 
@@ -224,6 +234,7 @@ interface DesignStudioModalProps {
   rareIngredients: RareDyeIngredients;
   baseAppearance: CloudAppearance;
   ownedCount: number;
+  unlockedVipIds?: string[];
   renderIngredientIcon?: (kind: OutfitEffectType, size?: number) => React.ReactNode;
   renderCharacterPreview: (
     appearance: CloudAppearance,
@@ -273,6 +284,7 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   rareIngredients,
   baseAppearance,
   ownedCount,
+  unlockedVipIds = [],
   renderIngredientIcon,
   renderCharacterPreview,
   onPlayClick,
@@ -283,6 +295,9 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   const [grid, setGrid] = useState<(string | null)[][]>(() => createEmptyGrid());
   const [history, setHistory] = useState<(string | null)[][][]>([]);
   const [tool, setTool] = useState<ToolKind>('pencil');
+  const [activeVipBrushId, setActiveVipBrushId] = useState<string | null>(null);
+  const [activeVipStickerId, setActiveVipStickerId] = useState<string | null>(null);
+  const [vipKitTab, setVipKitTab] = useState<'palettes' | 'brushes' | 'stickers'>('palettes');
   const [infuseEffect, setInfuseEffect] = useState<OutfitEffectType | null>(null);
   const [shimmerMask, setShimmerMask] = useState<boolean[][]>(() => createEmptyMask());
   const [nightNeonEnabled, setNightNeonEnabled] = useState<boolean>(false);
@@ -291,6 +306,21 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
   const [rainMode, setRainMode] = useState<RainReactiveStyle | null>(null);
   const [rainColor, setRainColor] = useState<string | null>(null);
   const [previewEnv, setPreviewEnv] = useState<PreviewEnv>('day');
+
+  const unlockedVipSet = React.useMemo(() => new Set(unlockedVipIds), [unlockedVipIds]);
+  const unlockedVipPalettes = React.useMemo(
+    () => VIP_REWARDS.filter((r) => r.subkind === 'studio_palette' && unlockedVipSet.has(r.id)),
+    [unlockedVipSet]
+  );
+  const unlockedVipBrushes = React.useMemo(
+    () => VIP_REWARDS.filter((r) => r.subkind === 'studio_brush' && unlockedVipSet.has(r.id)),
+    [unlockedVipSet]
+  );
+  const unlockedVipStickers = React.useMemo(
+    () => VIP_REWARDS.filter((r) => r.subkind === 'studio_sticker' && unlockedVipSet.has(r.id)),
+    [unlockedVipSet]
+  );
+  const vipStrokeCounterRef = useRef<number>(0);
 
   const initialHex = '#e26a67';
   const [hsv, setHsv] = useState<HSVColor>(() => hexToHsv(initialHex));
@@ -779,6 +809,26 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
       return;
     }
 
+    if (tool === 'vip_brush' && activeVipBrushId) {
+      const brushDef = getVipReward(activeVipBrushId);
+      const mode = brushDef?.brushMode as VipBrushMode | undefined;
+      if (mode) {
+        vipStrokeCounterRef.current += 1;
+        const pts = computeVipBrushPaint(mode, x, y, color, vipStrokeCounterRef.current);
+        setGrid((prev) => {
+          const next = cloneGrid(prev);
+          for (const pt of pts) {
+            next[pt.y][pt.x] = pt.hex;
+            if (mirrorX) {
+              next[pt.y][GRID_SIZE - 1 - pt.x] = pt.hex;
+            }
+          }
+          return next;
+        });
+        return;
+      }
+    }
+
     const nextColor = tool === 'eraser' ? null : color;
     setGrid((prev) => {
       const mx = GRID_SIZE - 1 - x;
@@ -814,6 +864,13 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
     if (tool === 'bucket') {
       onPlayClick();
       applyFloodFill(cell.x, cell.y, color);
+      return;
+    }
+
+    if (tool === 'vip_sticker' && activeVipStickerId) {
+      onPlayClick();
+      pushHistory(grid);
+      setGrid((prev) => stampVipStickerOnGrid(prev, activeVipStickerId, cell.x, cell.y, mirrorX));
       return;
     }
 
@@ -1234,9 +1291,145 @@ export const DesignStudioModal: React.FC<DesignStudioModalProps> = ({
                       ? 'Shadow Brush: draw over pixels to darken'
                       : tool === 'shade_light'
                         ? 'Highlight Brush: draw over pixels to lighten'
-                        : `Guide: ${SLOT_LABELS[slot]}`}
+                        : tool === 'vip_brush' && activeVipBrushId
+                          ? `VIP Brush: ${getVipReward(activeVipBrushId)?.name || 'Special'}`
+                          : tool === 'vip_sticker' && activeVipStickerId
+                            ? `VIP Stamp: tap canvas to place ${getVipReward(activeVipStickerId)?.name || 'Sticker'}`
+                            : `Guide: ${SLOT_LABELS[slot]}`}
               </span>
               <span className="tabular-nums">{paintedCount} px drawn</span>
+            </div>
+
+            {/* VIP Exclusive Studio Kit (Palettes, Special Brushes, Fabric Stamp Stickers) */}
+            <div className="flex w-full flex-col gap-1.5 rounded-sm border border-[#d97706] bg-[#fffbeb] p-2">
+              <div className="flex items-center justify-between gap-1 text-[10px] font-extrabold text-[#78350f]">
+                <span>★ VIP Studio Kit ({unlockedVipPalettes.length + unlockedVipBrushes.length + unlockedVipStickers.length}/25)</span>
+                <div className="flex gap-1">
+                  {(['palettes', 'brushes', 'stickers'] as const).map((kt) => (
+                    <button
+                      key={kt}
+                      type="button"
+                      onClick={() => {
+                        onPlayClick();
+                        setVipKitTab(kt);
+                      }}
+                      className={`cursor-pointer rounded-xs border px-1.5 py-0.5 text-[9px] font-bold capitalize ${
+                        vipKitTab === kt
+                          ? 'border-[#78350f] bg-[#f59e0b] text-[#291709]'
+                          : 'border-[#d97706]/50 bg-white text-[#78350f]'
+                      }`}
+                    >
+                      {kt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {vipKitTab === 'palettes' && (
+                unlockedVipPalettes.length === 0 ? (
+                  <p className="text-[10px] font-medium text-[#92400e]">
+                    Win Madame Lumière’s VIP Stylist events to unlock 10 Rare Studio Palettes!
+                  </p>
+                ) : (
+                  <div className="flex max-h-[70px] flex-col gap-1 overflow-y-auto">
+                    {unlockedVipPalettes.map((pal) => (
+                      <div key={pal.id} className="flex items-center justify-between gap-1 rounded-xs border border-[#fde68a] bg-white px-1.5 py-1">
+                        <span className="truncate text-[10px] font-bold text-[#45230d]">{pal.name}</span>
+                        <div className="flex shrink-0 gap-0.5">
+                          {(pal.studioPalette || []).map((hex) => (
+                            <button
+                              key={hex}
+                              type="button"
+                              title={`Select ${hex}`}
+                              onClick={() => {
+                                onPlayClick();
+                                selectHexColor(hex, true);
+                                if (tool === 'eraser' || tool === 'vip_sticker') setTool('pencil');
+                              }}
+                              className="h-4 w-4 cursor-pointer border border-black/35"
+                              style={{ backgroundColor: hex }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              )}
+
+              {vipKitTab === 'brushes' && (
+                unlockedVipBrushes.length === 0 ? (
+                  <p className="text-[10px] font-medium text-[#92400e]">
+                    Win VIP Stylist events to unlock 8 Special Pixel Brushes (Gold Trim, Sparkle, Rainbow)!
+                  </p>
+                ) : (
+                  <div className="flex max-h-[70px] flex-wrap gap-1 overflow-y-auto">
+                    {unlockedVipBrushes.map((br) => {
+                      const active = tool === 'vip_brush' && activeVipBrushId === br.id;
+                      return (
+                        <button
+                          key={br.id}
+                          type="button"
+                          onClick={() => {
+                            onPlayClick();
+                            if (active) {
+                              setTool('pencil');
+                              setActiveVipBrushId(null);
+                            } else {
+                              setActiveVipBrushId(br.id);
+                              setTool('vip_brush');
+                            }
+                          }}
+                          className={`cursor-pointer rounded-xs border px-2 py-0.5 text-[10px] font-bold ${
+                            active
+                              ? 'border-[#4c1d95] bg-[#7c3aed] text-white'
+                              : 'border-[#d97706] bg-white text-[#45230d] hover:bg-[#fef3c7]'
+                          }`}
+                        >
+                          {br.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )
+              )}
+
+              {vipKitTab === 'stickers' && (
+                unlockedVipStickers.length === 0 ? (
+                  <p className="text-[10px] font-medium text-[#92400e]">
+                    Win VIP Stylist events to unlock 7 Pixel Fabric Stamp Stickers (Crown, Heart, Star, Anchor)!
+                  </p>
+                ) : (
+                  <div className="flex max-h-[70px] flex-wrap gap-1 overflow-y-auto">
+                    {unlockedVipStickers.map((st) => {
+                      const active = tool === 'vip_sticker' && activeVipStickerId === st.id;
+                      return (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => {
+                            onPlayClick();
+                            if (active) {
+                              setTool('pencil');
+                              setActiveVipStickerId(null);
+                            } else {
+                              setActiveVipStickerId(st.id);
+                              setTool('vip_sticker');
+                            }
+                          }}
+                          className={`cursor-pointer rounded-xs border px-2 py-0.5 text-[10px] font-bold ${
+                            active
+                              ? 'border-[#9d174d] bg-[#db2777] text-white'
+                              : 'border-[#d97706] bg-white text-[#45230d] hover:bg-[#fef3c7]'
+                          }`}
+                        >
+                          {st.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )
+              )}
             </div>
 
             {infuseEffect === 'glowing_pearls' && (

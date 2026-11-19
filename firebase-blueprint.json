@@ -38,6 +38,24 @@
         "inventory": {
           "type": "object"
         },
+        "vipUnlockedIds": {
+          "type": "array"
+        },
+        "vipDecorCounts": {
+          "type": "object"
+        },
+        "equippedVipTitle": {
+          "type": "string"
+        },
+        "equippedPetAccessory": {
+          "type": "string"
+        },
+        "equippedBoatSkin": {
+          "type": "string"
+        },
+        "vipWinsCount": {
+          "type": "number"
+        },
         "lastSale": {
           "type": "object"
         },
@@ -91,6 +109,15 @@
         "appearance": {
           "type": "object"
         },
+        "vipTitle": {
+          "type": "string"
+        },
+        "petAccessory": {
+          "type": "string"
+        },
+        "boatSkin": {
+          "type": "string"
+        },
         "updatedAt": {
           "type": "string",
           "format": "date-time"
@@ -132,7 +159,9 @@
             "lantern_post",
             "rug_pink",
             "rug_teal",
-            "rug_gold"
+            "rug_gold",
+            "vip_decor",
+            "vip_trophy"
           ]
         },
         "col": {
@@ -154,6 +183,9 @@
         },
         "tier": {
           "type": "number"
+        },
+        "vipRewardId": {
+          "type": "string"
         },
         "listing": {
           "type": "object"

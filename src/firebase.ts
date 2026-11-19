@@ -379,6 +379,12 @@ export interface CloudPlayerProfile {
   ownedPets?: PetKind[];
   equippedPet?: PetKind | null;
   ownedMagazineIds?: string[];
+  vipUnlockedIds?: string[];
+  vipDecorCounts?: Record<string, number>;
+  equippedVipTitle?: string | null;
+  equippedPetAccessory?: string | null;
+  equippedBoatSkin?: string | null;
+  vipWinsCount?: number;
   totalSales?: number;
   editionMintCounts?: Record<string, number>;
   lastSale?: CloudLastSale | null;
@@ -401,6 +407,9 @@ export interface CloudOnlinePlayer {
   isBoating?: boolean;
   equippedBoat?: BoatKind | null;
   equippedPet?: PetKind | null;
+  vipTitle?: string | null;
+  petAccessory?: string | null;
+  boatSkin?: string | null;
   runwayShowAt?: number | null;
   updatedAt?: Timestamp;
 }
@@ -439,7 +448,9 @@ export type WorldStructureKind =
   | 'lantern_post'
   | 'rug_pink'
   | 'rug_teal'
-  | 'rug_gold';
+  | 'rug_gold'
+  | 'vip_decor'
+  | 'vip_trophy';
 
 export interface CloudWorldStructure {
   id: string;
@@ -449,6 +460,7 @@ export interface CloudWorldStructure {
   ownerId: string;
   ownerName: string;
   tier?: ShopTier;
+  vipRewardId?: string | null;
   listing?: CloudListing | null;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
@@ -731,6 +743,37 @@ function sanitizeMagazineIds(raw: unknown): string[] {
   return out.slice(0, 120);
 }
 
+function sanitizeVipId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+  return cleaned.length >= 3 ? cleaned : null;
+}
+
+function sanitizeVipUnlockedIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const id of raw) {
+    const clean = sanitizeVipId(id);
+    if (clean && !out.includes(clean)) {
+      out.push(clean);
+    }
+  }
+  return out.slice(0, 140);
+}
+
+function sanitizeVipDecorCounts(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const clean = sanitizeVipId(k);
+    const n = Math.floor(Number(v));
+    if (clean && Number.isFinite(n) && n > 0) {
+      out[clean] = Math.min(99, n);
+    }
+  }
+  return out;
+}
+
 function saveLocalPlayerRecord(profile: Omit<CloudPlayerProfile, 'updatedAt' | '_migratedFromLegacy'>): void {
   const map = readJsonRecord<Record<string, LocalProfileRecord>>(LOCAL_PLAYERS_KEY, {});
   const existing = map[profile.playerId];
@@ -756,6 +799,18 @@ function saveLocalPlayerRecord(profile: Omit<CloudPlayerProfile, 'updatedAt' | '
     ownedPets: sanitizePetList(profile.ownedPets ?? existing?.ownedPets),
     equippedPet: sanitizeEquippedPet(profile.equippedPet !== undefined ? profile.equippedPet : existing?.equippedPet),
     ownedMagazineIds: sanitizeMagazineIds(profile.ownedMagazineIds ?? existing?.ownedMagazineIds),
+    vipUnlockedIds: sanitizeVipUnlockedIds(profile.vipUnlockedIds ?? existing?.vipUnlockedIds),
+    vipDecorCounts: sanitizeVipDecorCounts(profile.vipDecorCounts ?? existing?.vipDecorCounts),
+    equippedVipTitle: sanitizeVipId(
+      profile.equippedVipTitle !== undefined ? profile.equippedVipTitle : existing?.equippedVipTitle
+    ),
+    equippedPetAccessory: sanitizeVipId(
+      profile.equippedPetAccessory !== undefined ? profile.equippedPetAccessory : existing?.equippedPetAccessory
+    ),
+    equippedBoatSkin: sanitizeVipId(
+      profile.equippedBoatSkin !== undefined ? profile.equippedBoatSkin : existing?.equippedBoatSkin
+    ),
+    vipWinsCount: Math.max(0, Math.round(Number(profile.vipWinsCount ?? existing?.vipWinsCount ?? 0))),
     totalSales: Math.max(0, Math.round(Number(profile.totalSales ?? existing?.totalSales ?? 0))),
     editionMintCounts: sanitizeMintCounts(profile.editionMintCounts ?? existing?.editionMintCounts),
     lastSale: profile.lastSale ?? existing?.lastSale ?? null,
@@ -777,6 +832,12 @@ function readLocalPlayerProfile(playerId: string): CloudPlayerProfile | null {
     ownedPets: sanitizePetList(rec.ownedPets),
     equippedPet: sanitizeEquippedPet(rec.equippedPet),
     ownedMagazineIds: sanitizeMagazineIds(rec.ownedMagazineIds),
+    vipUnlockedIds: sanitizeVipUnlockedIds(rec.vipUnlockedIds),
+    vipDecorCounts: sanitizeVipDecorCounts(rec.vipDecorCounts),
+    equippedVipTitle: sanitizeVipId(rec.equippedVipTitle),
+    equippedPetAccessory: sanitizeVipId(rec.equippedPetAccessory),
+    equippedBoatSkin: sanitizeVipId(rec.equippedBoatSkin),
+    vipWinsCount: Math.max(0, Math.round(Number(rec.vipWinsCount || 0))),
     updatedAt: makeLocalTimestamp(rec.updatedAtMs || Date.now()),
   };
 }
@@ -805,6 +866,9 @@ function saveLocalOnlineRecord(presence: Omit<CloudOnlinePlayer, 'updatedAt'>): 
     isBoating: Boolean(presence.isBoating),
     equippedBoat: sanitizeEquippedBoat(presence.equippedBoat, presence.isBoating),
     equippedPet: sanitizeEquippedPet(presence.equippedPet),
+    vipTitle: sanitizeVipId(presence.vipTitle),
+    petAccessory: sanitizeVipId(presence.petAccessory),
+    boatSkin: sanitizeVipId(presence.boatSkin),
     runwayShowAt: presence.runwayShowAt || null,
     updatedAtMs: now,
   };
@@ -838,6 +902,9 @@ function readLocalOnlinePlayers(): CloudOnlinePlayer[] {
       isBoating: Boolean(entry.isBoating),
       equippedBoat: sanitizeEquippedBoat(entry.equippedBoat, entry.isBoating),
       equippedPet: sanitizeEquippedPet(entry.equippedPet),
+      vipTitle: sanitizeVipId(entry.vipTitle),
+      petAccessory: sanitizeVipId(entry.petAccessory),
+      boatSkin: sanitizeVipId(entry.boatSkin),
       runwayShowAt: entry.runwayShowAt ?? null,
       updatedAt: makeLocalTimestamp(entry.updatedAtMs),
     });
@@ -868,6 +935,7 @@ function saveLocalStructureRecord(
     ownerId: structure.ownerId,
     ownerName: sanitizeName(structure.ownerName, 20),
     tier: structure.kind === 'boutique_shop' ? clampShopTier(structure.tier) : undefined,
+    vipRewardId: sanitizeVipId(structure.vipRewardId ?? existing?.vipRewardId),
     listing: cleanListing,
     createdAtMs: existing?.createdAtMs || now,
     updatedAtMs: now,
@@ -886,6 +954,7 @@ function readLocalStructures(): CloudWorldStructure[] {
     ownerId: s.ownerId,
     ownerName: s.ownerName,
     tier: s.kind === 'boutique_shop' ? clampShopTier(s.tier) : undefined,
+    vipRewardId: sanitizeVipId(s.vipRewardId),
     listing: s.listing ?? null,
     createdAt: makeLocalTimestamp(s.createdAtMs || Date.now()),
     updatedAt: makeLocalTimestamp(s.updatedAtMs || Date.now()),
@@ -928,6 +997,12 @@ export async function flushPendingSyncToCloud(): Promise<void> {
               ownedPets: sanitizePetList(localProfile.ownedPets),
               equippedPet: sanitizeEquippedPet(localProfile.equippedPet),
               ownedMagazineIds: sanitizeMagazineIds(localProfile.ownedMagazineIds),
+              vipUnlockedIds: sanitizeVipUnlockedIds(localProfile.vipUnlockedIds),
+              vipDecorCounts: sanitizeVipDecorCounts(localProfile.vipDecorCounts),
+              equippedVipTitle: sanitizeVipId(localProfile.equippedVipTitle),
+              equippedPetAccessory: sanitizeVipId(localProfile.equippedPetAccessory),
+              equippedBoatSkin: sanitizeVipId(localProfile.equippedBoatSkin),
+              vipWinsCount: Math.max(0, Math.round(Number(localProfile.vipWinsCount || 0))),
               totalSales: Math.max(0, Math.round(Number(localProfile.totalSales || 0))),
               editionMintCounts: sanitizeMintCounts(localProfile.editionMintCounts),
               updatedAt: serverTimestamp(),
@@ -964,6 +1039,7 @@ export async function flushPendingSyncToCloud(): Promise<void> {
               ownerId: st.ownerId,
               ownerName: sanitizeName(st.ownerName, 20),
               ...(st.kind === 'boutique_shop' ? { tier: clampShopTier(st.tier) } : {}),
+              ...(st.vipRewardId ? { vipRewardId: sanitizeVipId(st.vipRewardId) } : {}),
               listing: st.listing ?? null,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
@@ -1226,6 +1302,12 @@ export async function savePlayerProfile(
     ownedPets: sanitizePetList(profile.ownedPets),
     equippedPet: sanitizeEquippedPet(profile.equippedPet),
     ownedMagazineIds: sanitizeMagazineIds(profile.ownedMagazineIds),
+    vipUnlockedIds: sanitizeVipUnlockedIds(profile.vipUnlockedIds),
+    vipDecorCounts: sanitizeVipDecorCounts(profile.vipDecorCounts),
+    equippedVipTitle: sanitizeVipId(profile.equippedVipTitle),
+    equippedPetAccessory: sanitizeVipId(profile.equippedPetAccessory),
+    equippedBoatSkin: sanitizeVipId(profile.equippedBoatSkin),
+    vipWinsCount: Math.max(0, Math.round(Number(profile.vipWinsCount || 0))),
     totalSales: Math.max(0, Math.round(Number(profile.totalSales || 0))),
     editionMintCounts: sanitizeMintCounts(profile.editionMintCounts),
     updatedAt: serverTimestamp(),
@@ -1326,6 +1408,9 @@ export async function syncOnlinePlayer(presence: Omit<CloudOnlinePlayer, 'update
         isBoating: Boolean(presence.isBoating),
         equippedBoat: sanitizeEquippedBoat(presence.equippedBoat, presence.isBoating),
         equippedPet: sanitizeEquippedPet(presence.equippedPet),
+        vipTitle: sanitizeVipId(presence.vipTitle),
+        petAccessory: sanitizeVipId(presence.petAccessory),
+        boatSkin: sanitizeVipId(presence.boatSkin),
         runwayShowAt: presence.runwayShowAt || null,
         updatedAt: serverTimestamp(),
       }),
@@ -1450,6 +1535,7 @@ export async function createWorldStructure(
         ownerId: structure.ownerId,
         ownerName: sanitizeName(structure.ownerName, 20),
         ...(structure.kind === 'boutique_shop' ? { tier: clampShopTier(structure.tier) } : {}),
+        ...(structure.vipRewardId ? { vipRewardId: sanitizeVipId(structure.vipRewardId) } : {}),
         listing: cleanListing,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -1542,6 +1628,7 @@ export async function relocateWorldShopAndContents(
     ownerId: string;
     ownerName: string;
     tier?: ShopTier;
+    vipRewardId?: string | null;
     listing?: CloudListing | null;
   }>
 ): Promise<boolean> {
@@ -1564,6 +1651,7 @@ export async function relocateWorldShopAndContents(
       ownerId: u.ownerId,
       ownerName: sanitizeName(u.ownerName, 20),
       tier: u.kind === 'boutique_shop' ? clampShopTier(u.tier ?? prev?.tier) : undefined,
+      vipRewardId: sanitizeVipId(u.vipRewardId ?? prev?.vipRewardId),
       listing: cleanListing,
       createdAtMs: prev?.createdAtMs || now,
       updatedAtMs: now,
@@ -1593,6 +1681,7 @@ export async function relocateWorldShopAndContents(
           ownerId: rec.ownerId,
           ownerName: rec.ownerName,
           ...(rec.kind === 'boutique_shop' ? { tier: clampShopTier(rec.tier) } : {}),
+          ...(rec.vipRewardId ? { vipRewardId: sanitizeVipId(rec.vipRewardId) } : {}),
           listing: rec.listing ?? null,
           updatedAt: serverTimestamp(),
         },
@@ -1739,6 +1828,7 @@ export function subscribeWorldStructures(
         const structObj: CloudWorldStructure = {
           ...(raw as unknown as CloudWorldStructure),
           tier: raw.kind === 'boutique_shop' ? clampShopTier(raw.tier) : undefined,
+          vipRewardId: sanitizeVipId(raw.vipRewardId),
           listing: normalizedListing,
         };
         list.push(structObj);
@@ -1752,6 +1842,7 @@ export function subscribeWorldStructures(
             ownerId: structObj.ownerId,
             ownerName: structObj.ownerName,
             tier: structObj.kind === 'boutique_shop' ? clampShopTier(structObj.tier) : undefined,
+            vipRewardId: sanitizeVipId(structObj.vipRewardId),
             listing: normalizedListing,
             createdAtMs: structObj.createdAt?.toMillis?.() || Date.now(),
             updatedAtMs: structObj.updatedAt?.toMillis?.() || Date.now(),

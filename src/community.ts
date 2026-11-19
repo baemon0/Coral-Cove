@@ -126,7 +126,7 @@ export function getCurrentFashionTrend(nowMs = Date.now()): {
   return { trend, periodIndex, msRemaining, formattedTime };
 }
 
-function classifyHexColor(hex: string): ColorFamily | null {
+export function classifyHexColor(hex: string): ColorFamily | null {
   const clean = hex.trim().replace('#', '');
   if (!/^[0-9a-fA-F]{6}$/.test(clean)) return null;
   const r = parseInt(clean.slice(0, 2), 16) / 255;
